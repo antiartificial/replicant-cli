@@ -30,11 +30,13 @@ type StreamErrorMsg struct {
 }
 
 // PermissionRequestMsg asks the user to approve or deny a tool call.
+// The caller blocks on Response; send true for approved, false for denied.
 type PermissionRequestMsg struct {
 	ToolCallID string
 	ToolName   string
 	Args       string
 	RiskLevel  permission.RiskLevel
+	Response   chan<- bool // send true=approved, false=denied
 }
 
 // PermissionResponseMsg carries the user's decision for a permission request.

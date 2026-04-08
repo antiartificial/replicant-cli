@@ -10,15 +10,24 @@ import (
 
 	"github.com/antiartificial/replicant/internal/agent"
 	"github.com/antiartificial/replicant/internal/config"
+	"github.com/antiartificial/replicant/internal/permission"
 	"github.com/antiartificial/replicant/internal/replicant"
 	"github.com/antiartificial/replicant/internal/tools"
 	"github.com/antiartificial/replicant/internal/tui"
 )
 
+var version = "dev"
+
 func main() {
 	replicantName := flag.String("r", "deckard", "replicant name to load")
 	modelOverride := flag.String("m", "", "override model (e.g. claude-sonnet-4-20250514)")
+	showVersion := flag.Bool("v", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("replicant", version)
+		return
+	}
 
 	if err := run(*replicantName, *modelOverride); err != nil {
 		fmt.Fprintf(os.Stderr, "replicant: %v\n", err)
@@ -57,8 +66,22 @@ func run(replicantName, modelOverride string) error {
 	if model == "" {
 		model = cfg.DefaultModel
 	}
-	// Strip provider prefix if present (e.g. "anthropic/claude-sonnet-4-20250514" -> "claude-sonnet-4-20250514")
-	model = stripProviderPrefix(model)
+
+	// Create the provider and strip any "provider/" prefix from the model name.
+	provider, model, err := agent.NewProvider(model, cfg.AnthropicKey, cfg.OpenAIKey)
+	if err != nil {
+		return fmt.Errorf("provider: %w", err)
+	}
+
+	// Parse autonomy level from config.
+	autonomyLevel := parseAutonomyLevel(cfg.Autonomy)
+
+	// Create the session log.
+	session, err := agent.NewSession(cfg.SessionDir, def.Name, model)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	defer session.Close()
 
 	// Set up tools.
 	toolRegistry := tools.NewRegistry()
@@ -83,8 +106,34 @@ func run(replicantName, modelOverride string) error {
 		return t.Run(args)
 	}
 
-	// Create the Anthropic provider.
-	provider := agent.NewAnthropicProvider(cfg.AnthropicKey)
+	// currentEventsCh is set by agentFn on each invocation so the permission
+	// function can forward PermissionRequestMsg into the TUI event stream.
+	var currentEventsCh chan<- tea.Msg
+
+	// permFn checks risk level and, when confirmation is needed, sends a
+	// PermissionRequestMsg to the TUI and blocks until the user responds.
+	permFn := func(name, args string) (bool, error) {
+		t, found := toolRegistry.Get(name)
+		if !found {
+			// Unknown tool — deny to be safe.
+			return false, nil
+		}
+		if !t.Risk().NeedsConfirmation(autonomyLevel) {
+			return true, nil
+		}
+		responseCh := make(chan bool, 1)
+		if currentEventsCh != nil {
+			currentEventsCh <- tui.PermissionRequestMsg{
+				ToolCallID: name,
+				ToolName:   name,
+				Args:       args,
+				RiskLevel:  t.Risk(),
+				Response:   responseCh,
+			}
+		}
+		approved := <-responseCh
+		return approved, nil
+	}
 
 	// Create the agent.
 	a := agent.NewAgent(provider,
@@ -95,12 +144,24 @@ func run(replicantName, modelOverride string) error {
 		agent.WithTools(toolDefs),
 		agent.WithToolRunner(toolRunner),
 		agent.WithMaxTurns(def.MaxTurns),
+		agent.WithPermissionFn(permFn),
 	)
 
 	// Build the TUI agent function that bridges agent events to bubbletea messages.
 	var history []agent.Message
 
 	agentFn := func(ctx context.Context, message string, events chan<- tea.Msg) {
+		// Expose the events channel to the permission function for this turn.
+		currentEventsCh = events
+		defer func() { currentEventsCh = nil }()
+
+		// Log the user message to the session.
+		_ = session.Append(agent.SessionEntry{
+			Type:    "message",
+			Role:    "user",
+			Content: message,
+		})
+
 		agentEvents := make(chan agent.Event, 64)
 
 		go func() {
@@ -111,14 +172,30 @@ func run(replicantName, modelOverride string) error {
 		for ev := range agentEvents {
 			switch ev.Type {
 			case agent.EventText:
+				_ = session.Append(agent.SessionEntry{
+					Type:    "message",
+					Role:    "assistant",
+					Content: ev.Text,
+				})
 				events <- tui.StreamChunkMsg{Text: ev.Text}
 			case agent.EventToolCall:
+				_ = session.Append(agent.SessionEntry{
+					Type:     "tool_call",
+					ToolName: ev.ToolName,
+					ToolArgs: ev.ToolArgs,
+					ToolID:   ev.ToolID,
+				})
 				events <- tui.ToolCallMsg{
 					ID:   ev.ToolID,
 					Name: ev.ToolName,
 					Args: ev.ToolArgs,
 				}
 			case agent.EventToolResult:
+				_ = session.Append(agent.SessionEntry{
+					Type:   "tool_result",
+					ToolID: ev.ToolID,
+					Result: ev.Result,
+				})
 				events <- tui.ToolResultMsg{
 					ID:      ev.ToolID,
 					Result:  ev.Result,
@@ -143,12 +220,16 @@ func run(replicantName, modelOverride string) error {
 	return tui.Run(model, agentFn)
 }
 
-// stripProviderPrefix removes a "provider/" prefix from a model string.
-func stripProviderPrefix(model string) string {
-	for i := range model {
-		if model[i] == '/' {
-			return model[i+1:]
-		}
+// parseAutonomyLevel converts a config string to a permission.AutonomyLevel.
+func parseAutonomyLevel(s string) permission.AutonomyLevel {
+	switch s {
+	case "full":
+		return permission.AutonomyFull
+	case "high":
+		return permission.AutonomyHigh
+	case "normal":
+		return permission.AutonomyNormal
+	default:
+		return permission.AutonomyOff
 	}
-	return model
 }

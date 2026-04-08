@@ -74,6 +74,14 @@ func WithMaxTurns(n int) AgentOption {
 	return func(a *Agent) { a.maxTurns = n }
 }
 
+// WithPermissionFn registers a callback that is called before each tool
+// execution. If the callback returns (false, nil) the tool call is denied and
+// the model receives a tool_result error. If it returns a non-nil error the
+// agent loop is stopped with that error.
+func WithPermissionFn(fn func(name, args string) (bool, error)) AgentOption {
+	return func(a *Agent) { a.permissionFn = fn }
+}
+
 // Agent runs the ReAct (Reasoning + Acting) loop against a Provider.
 type Agent struct {
 	provider     Provider
@@ -83,6 +91,7 @@ type Agent struct {
 	temperature  float64
 	tools        []ToolDef
 	toolRunner   func(name string, args string) (string, error)
+	permissionFn func(name string, args string) (bool, error)
 	maxTurns     int
 }
 
@@ -111,6 +120,10 @@ func NewAgent(provider Provider, opts ...AgentOption) *Agent {
 //   - maxTurns is reached
 //   - ctx is cancelled
 //   - An unrecoverable error occurs
+//
+// When the provider implements StreamProvider, Run uses streaming so that
+// EventText events are emitted character-by-character as the model generates
+// them. Otherwise it falls back to the non-streaming Complete path.
 func (a *Agent) Run(ctx context.Context, userMessage string, history []Message, events chan<- Event) {
 	// Build the initial message list.
 	messages := make([]Message, len(history))
@@ -120,6 +133,16 @@ func (a *Agent) Run(ctx context.Context, userMessage string, history []Message, 
 		Content: []ContentBlock{{Type: "text", Text: userMessage}},
 	})
 
+	// Prefer streaming when the provider supports it.
+	if sp, ok := a.provider.(StreamProvider); ok {
+		a.runStreaming(ctx, sp, messages, events)
+		return
+	}
+	a.runNonStreaming(ctx, messages, events)
+}
+
+// runNonStreaming runs the ReAct loop using the non-streaming Complete path.
+func (a *Agent) runNonStreaming(ctx context.Context, messages []Message, events chan<- Event) {
 	var cumulativeUsage Usage
 
 	for turn := 0; turn < a.maxTurns; turn++ {
@@ -196,33 +219,9 @@ func (a *Agent) Run(ctx context.Context, userMessage string, history []Message, 
 			return
 		}
 
-		resultBlocks := make([]ContentBlock, 0, len(toolCalls))
-		for _, tc := range toolCalls {
-			result, toolErr := a.runTool(tc.Name, string(tc.Input))
-			isErr := toolErr != nil
-
-			var resultText string
-			if toolErr != nil {
-				resultText = toolErr.Error()
-			} else {
-				resultText = result
-			}
-
-			events <- Event{
-				Type:     EventToolResult,
-				ToolID:   tc.ID,
-				ToolName: tc.Name,
-				Result:   resultText,
-				IsError:  isErr,
-				Usage:    cumulativeUsage,
-			}
-
-			resultBlocks = append(resultBlocks, ContentBlock{
-				Type:      "tool_result",
-				ToolUseID: tc.ID,
-				Content:   resultText,
-				IsError:   isErr,
-			})
+		resultBlocks, stop := a.executeToolCalls(toolCalls, cumulativeUsage, events)
+		if stop {
+			return
 		}
 
 		// Feed tool results back as a user message.
@@ -239,6 +238,239 @@ func (a *Agent) Run(ctx context.Context, userMessage string, history []Message, 
 		Error:   fmt.Errorf("agent: max turns (%d) reached without end_turn", a.maxTurns),
 		Usage:   cumulativeUsage,
 	}
+}
+
+// runStreaming runs the ReAct loop using the streaming Stream path.
+//
+// Each streaming turn:
+//  1. Opens a stream via sp.Stream, which emits StreamEvents on a local channel.
+//  2. Text deltas are forwarded as EventText events immediately.
+//  3. Tool use events are collected; on tool_use_end the full call is emitted
+//     as an EventToolCall and recorded so it can be appended to history.
+//  4. When "message_done" arrives, the accumulated content blocks are appended
+//     to the conversation history and the loop decides whether to continue.
+func (a *Agent) runStreaming(ctx context.Context, sp StreamProvider, messages []Message, events chan<- Event) {
+	var cumulativeUsage Usage
+
+	for turn := 0; turn < a.maxTurns; turn++ {
+		if ctx.Err() != nil {
+			events <- Event{Type: EventError, IsError: true, Error: ctx.Err(), Usage: cumulativeUsage}
+			return
+		}
+
+		req := &CompletionRequest{
+			Model:       a.model,
+			System:      a.systemPrompt,
+			Messages:    messages,
+			Tools:       a.tools,
+			MaxTokens:   a.maxTokens,
+			Temperature: a.temperature,
+		}
+
+		// Buffers accumulated during this stream turn.
+		var (
+			textBuf    []byte
+			toolCalls  []ContentBlock
+			stopReason string
+			turnUsage  Usage
+		)
+
+		// pendingTool is the tool_use block currently being streamed.
+		type pendingToolState struct {
+			id       string
+			name     string
+			inputBuf []byte
+		}
+		var pending *pendingToolState
+
+		// Run the stream in a goroutine so we can iterate over the channel.
+		streamCh := make(chan StreamEvent, 64)
+		streamErrCh := make(chan error, 1)
+
+		go func() {
+			streamErrCh <- sp.Stream(ctx, req, streamCh)
+			close(streamCh)
+		}()
+
+		for se := range streamCh {
+			switch se.Type {
+			case "text_delta":
+				textBuf = append(textBuf, se.Text...)
+				events <- Event{
+					Type:  EventText,
+					Text:  se.Text,
+					Usage: cumulativeUsage,
+				}
+
+			case "tool_use_start":
+				pending = &pendingToolState{
+					id:   se.ToolID,
+					name: se.ToolName,
+				}
+
+			case "tool_use_delta":
+				if pending != nil {
+					pending.inputBuf = append(pending.inputBuf, se.ToolInput...)
+				}
+
+			case "tool_use_end":
+				if pending != nil {
+					inputJSON := json.RawMessage(pending.inputBuf)
+					if len(inputJSON) == 0 {
+						inputJSON = json.RawMessage("{}")
+					}
+					tc := ContentBlock{
+						Type:  "tool_use",
+						ID:    pending.id,
+						Name:  pending.name,
+						Input: inputJSON,
+					}
+					toolCalls = append(toolCalls, tc)
+					events <- Event{
+						Type:     EventToolCall,
+						ToolName: tc.Name,
+						ToolArgs: string(tc.Input),
+						ToolID:   tc.ID,
+						Usage:    cumulativeUsage,
+					}
+					pending = nil
+				}
+
+			case "message_done":
+				stopReason = se.StopReason
+				turnUsage = se.Usage
+			}
+		}
+
+		if err := <-streamErrCh; err != nil {
+			events <- Event{
+				Type:    EventError,
+				IsError: true,
+				Error:   fmt.Errorf("turn %d: %w", turn, err),
+				Usage:   cumulativeUsage,
+			}
+			return
+		}
+
+		// Accumulate usage from this turn.
+		cumulativeUsage.InputTokens += turnUsage.InputTokens
+		cumulativeUsage.OutputTokens += turnUsage.OutputTokens
+
+		// Build the assistant content blocks for history.
+		var assistantContent []ContentBlock
+		if len(textBuf) > 0 {
+			assistantContent = append(assistantContent, ContentBlock{
+				Type: "text",
+				Text: string(textBuf),
+			})
+		}
+		assistantContent = append(assistantContent, toolCalls...)
+
+		// Append the assistant turn to history.
+		messages = append(messages, Message{
+			Role:    "assistant",
+			Content: assistantContent,
+		})
+
+		// Decide whether to continue.
+		if stopReason == "end_turn" || stopReason == "stop_sequence" {
+			events <- Event{Type: EventDone, Usage: cumulativeUsage}
+			return
+		}
+
+		if stopReason == "max_tokens" && len(toolCalls) == 0 {
+			events <- Event{Type: EventDone, Usage: cumulativeUsage}
+			return
+		}
+
+		if len(toolCalls) == 0 {
+			// No tool calls and no end_turn — treat as done to avoid spinning.
+			events <- Event{Type: EventDone, Usage: cumulativeUsage}
+			return
+		}
+
+		// Execute tool calls and build the tool_result user turn.
+		resultBlocks, stop := a.executeToolCalls(toolCalls, cumulativeUsage, events)
+		if stop {
+			return
+		}
+
+		// Feed tool results back as a user message.
+		messages = append(messages, Message{
+			Role:    "user",
+			Content: resultBlocks,
+		})
+	}
+
+	// maxTurns reached.
+	events <- Event{
+		Type:    EventError,
+		IsError: true,
+		Error:   fmt.Errorf("agent: max turns (%d) reached without end_turn", a.maxTurns),
+		Usage:   cumulativeUsage,
+	}
+}
+
+// executeToolCalls runs permission checks and executes each tool call.
+// It returns the result content blocks and a stop flag. When stop is true
+// the caller must return immediately (a fatal error was emitted to events).
+func (a *Agent) executeToolCalls(toolCalls []ContentBlock, cumulativeUsage Usage, events chan<- Event) ([]ContentBlock, bool) {
+	resultBlocks := make([]ContentBlock, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		// Check permission before running the tool.
+		if a.permissionFn != nil {
+			approved, permErr := a.permissionFn(tc.Name, string(tc.Input))
+			if permErr != nil {
+				events <- Event{Type: EventError, IsError: true, Error: fmt.Errorf("permission check: %w", permErr), Usage: cumulativeUsage}
+				return nil, true
+			}
+			if !approved {
+				const deniedMsg = "Tool call denied by user"
+				events <- Event{
+					Type:     EventToolResult,
+					ToolID:   tc.ID,
+					ToolName: tc.Name,
+					Result:   deniedMsg,
+					IsError:  true,
+					Usage:    cumulativeUsage,
+				}
+				resultBlocks = append(resultBlocks, ContentBlock{
+					Type:      "tool_result",
+					ToolUseID: tc.ID,
+					Content:   deniedMsg,
+					IsError:   true,
+				})
+				continue
+			}
+		}
+
+		result, toolErr := a.runTool(tc.Name, string(tc.Input))
+		isErr := toolErr != nil
+
+		var resultText string
+		if toolErr != nil {
+			resultText = toolErr.Error()
+		} else {
+			resultText = result
+		}
+
+		events <- Event{
+			Type:     EventToolResult,
+			ToolID:   tc.ID,
+			ToolName: tc.Name,
+			Result:   resultText,
+			IsError:  isErr,
+			Usage:    cumulativeUsage,
+		}
+
+		resultBlocks = append(resultBlocks, ContentBlock{
+			Type:      "tool_result",
+			ToolUseID: tc.ID,
+			Content:   resultText,
+			IsError:   isErr,
+		})
+	}
+	return resultBlocks, false
 }
 
 // runTool executes a single tool call. If no toolRunner is registered it

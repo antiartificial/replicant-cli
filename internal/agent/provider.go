@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 )
 
 // Message is a single turn in a conversation.
@@ -64,4 +66,62 @@ type Usage struct {
 // Implementations must be safe for concurrent use.
 type Provider interface {
 	Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error)
+}
+
+// StreamEvent is a single event emitted during a streaming completion.
+type StreamEvent struct {
+	// Type is one of "text_delta", "tool_use_start", "tool_use_delta",
+	// "tool_use_end", or "message_done".
+	Type string
+
+	// Text is the text fragment for "text_delta" events.
+	Text string
+
+	// ToolID is the tool invocation ID for tool_use_* events.
+	ToolID string
+	// ToolName is the tool name for "tool_use_start" events.
+	ToolName string
+	// ToolInput is the accumulated JSON input for "tool_use_end" events and
+	// the partial JSON fragment for "tool_use_delta" events.
+	ToolInput string
+
+	// StopReason is set on "message_done" events.
+	StopReason string
+	// Usage is set on "message_done" events with the final token counts.
+	Usage Usage
+}
+
+// StreamProvider is an optional extension of Provider that supports
+// incremental streaming of completion events.
+// Implementations must be safe for concurrent use.
+type StreamProvider interface {
+	Provider
+	Stream(ctx context.Context, req *CompletionRequest, events chan<- StreamEvent) error
+}
+
+// NewProvider creates a Provider from a prefixed model string such as:
+//
+//	"anthropic/claude-sonnet-4-20250514"  -> AnthropicProvider
+//	"openai/gpt-4o"                       -> OpenAIProvider
+//	"xai/grok-3"                          -> OpenAIProvider (xAI base URL)
+//
+// It returns the provider, the bare model name (without the prefix), and any
+// error. When no prefix is present the model is assumed to be Anthropic.
+func NewProvider(model string, anthropicKey string, openaiKey string) (Provider, string, error) {
+	prefix, bare, found := strings.Cut(model, "/")
+	if !found {
+		// No prefix — treat as Anthropic for backward compatibility.
+		return NewAnthropicProvider(anthropicKey), model, nil
+	}
+
+	switch strings.ToLower(prefix) {
+	case "anthropic":
+		return NewAnthropicProvider(anthropicKey), bare, nil
+	case "openai":
+		return NewOpenAIProvider(openaiKey), bare, nil
+	case "xai":
+		return NewXAIProvider(openaiKey), bare, nil
+	default:
+		return nil, "", fmt.Errorf("unknown provider prefix %q in model %q", prefix, model)
+	}
 }

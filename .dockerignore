@@ -1,0 +1,6 @@
+replicant
+*.exe
+.git
+.DS_Store
+.idea
+.vscode

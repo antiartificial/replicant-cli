@@ -12,9 +12,10 @@ import (
 type agentState int
 
 const (
-	stateIdle             agentState = iota
-	stateWaitingForAgent             // submitted, waiting for first chunk
-	stateStreaming                   // receiving stream chunks
+	stateIdle                  agentState = iota
+	stateWaitingForAgent                  // submitted, waiting for first chunk
+	stateStreaming                        // receiving stream chunks
+	stateWaitingForPermission             // blocked on a permission y/n prompt
 )
 
 // AgentFunc is the callback type for agent interactions. Implementations should
@@ -35,6 +36,13 @@ type AppModel struct {
 	state      agentState
 	agentFn    AgentFunc
 	cancelFn   context.CancelFunc
+
+	// pendingPermission is set while we are waiting for the user to respond
+	// to a permission request with y or n.
+	pendingPermission chan<- bool
+	// pendingEventsCh is the agent events channel to resume draining after
+	// a permission response is sent.
+	pendingEventsCh <-chan tea.Msg
 
 	width  int
 	height int
@@ -90,6 +98,46 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── keyboard ─────────────────────────────────────────────────────────────
 	case tea.KeyMsg:
+		// Handle permission prompt first so y/n is not forwarded to the input.
+		if m.state == stateWaitingForPermission && m.pendingPermission != nil {
+			switch msg.String() {
+			case "y", "Y":
+				m.pendingPermission <- true
+				m.pendingPermission = nil
+				m.state = stateStreaming
+				m.statusbar.SetStreaming(true)
+				if m.pendingEventsCh != nil {
+					ch := m.pendingEventsCh
+					m.pendingEventsCh = nil
+					return m, drainChannel(ch)
+				}
+				return m, nil
+			case "n", "N", "esc":
+				m.pendingPermission <- false
+				m.pendingPermission = nil
+				m.state = stateStreaming
+				m.statusbar.SetStreaming(true)
+				if m.pendingEventsCh != nil {
+					ch := m.pendingEventsCh
+					m.pendingEventsCh = nil
+					return m, drainChannel(ch)
+				}
+				return m, nil
+			case "ctrl+c":
+				if m.pendingPermission != nil {
+					m.pendingPermission <- false
+					m.pendingPermission = nil
+				}
+				if m.cancelFn != nil {
+					m.cancelFn()
+				}
+				return m, tea.Quit
+			default:
+				// Ignore all other keys while waiting for permission.
+				return m, nil
+			}
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if m.cancelFn != nil {
@@ -205,6 +253,26 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelFn()
 			m.cancelFn = nil
 		}
+
+	case PermissionRequestMsg:
+		// Show a confirmation prompt and wait for the user to press y or n.
+		prompt := fmt.Sprintf("[%s] wants to run: %s\nAllow? (y/n)", msg.ToolName, msg.Args)
+		m.conversation.AddBanner(prompt)
+		m.pendingPermission = msg.Response
+		m.state = stateWaitingForPermission
+		m.spinner.Stop()
+		m.statusbar.SetStreaming(false)
+
+	case permissionRequestWithChanMsg:
+		// Same as PermissionRequestMsg but we also have the events channel so
+		// we can resume draining once the user responds.
+		prompt := fmt.Sprintf("[%s] wants to run: %s\nAllow? (y/n)", msg.ToolName, msg.Args)
+		m.conversation.AddBanner(prompt)
+		m.pendingPermission = msg.Response
+		m.pendingEventsCh = msg.ch
+		m.state = stateWaitingForPermission
+		m.spinner.Stop()
+		m.statusbar.SetStreaming(false)
 	}
 
 	// ── delegate to sub-models ───────────────────────────────────────────────
@@ -293,6 +361,11 @@ type toolResultWithChanMsg struct {
 	ch <-chan tea.Msg
 }
 
+type permissionRequestWithChanMsg struct {
+	PermissionRequestMsg
+	ch <-chan tea.Msg
+}
+
 // drainChannel reads the next message from ch and wraps it so the Update
 // loop knows to keep draining. Closes with StreamDoneMsg when ch is closed.
 func drainChannel(ch <-chan tea.Msg) tea.Cmd {
@@ -308,8 +381,10 @@ func drainChannel(ch <-chan tea.Msg) tea.Cmd {
 			return toolCallWithChanMsg{ToolCallMsg: m, ch: ch}
 		case ToolResultMsg:
 			return toolResultWithChanMsg{ToolResultMsg: m, ch: ch}
+		case PermissionRequestMsg:
+			return permissionRequestWithChanMsg{PermissionRequestMsg: m, ch: ch}
 		default:
-			// StreamDoneMsg, StreamErrorMsg, PermissionRequestMsg, etc. pass through
+			// StreamDoneMsg, StreamErrorMsg, etc. pass through
 			return msg
 		}
 	}
