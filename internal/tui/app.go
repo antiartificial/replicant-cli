@@ -1,0 +1,331 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// agentState represents the current state of the agent interaction loop.
+type agentState int
+
+const (
+	stateIdle             agentState = iota
+	stateWaitingForAgent             // submitted, waiting for first chunk
+	stateStreaming                   // receiving stream chunks
+)
+
+// AgentFunc is the callback type for agent interactions. Implementations should
+// push StreamChunkMsg, ToolCallMsg, ToolResultMsg, and finally StreamDoneMsg (or
+// StreamErrorMsg) onto events, then return.
+type AgentFunc func(ctx context.Context, message string, events chan<- tea.Msg)
+
+// banner shown at startup
+const bannerText = " ╱╲  REPLICANT\n╱  ╲ v0.1.0"
+
+// AppModel is the root bubbletea model for the replicant TUI.
+type AppModel struct {
+	conversation ConversationModel
+	input        InputModel
+	statusbar    StatusBarModel
+	spinner      SpinnerModel
+
+	state      agentState
+	agentFn    AgentFunc
+	cancelFn   context.CancelFunc
+
+	width  int
+	height int
+}
+
+// NewAppModel constructs the root model. agentFn may be nil for a stub UI.
+func NewAppModel(modelName string, agentFn AgentFunc) AppModel {
+	// Start with a small default size; real size comes from WindowSizeMsg.
+	const defaultW, defaultH = 80, 24
+
+	m := AppModel{
+		conversation: NewConversationModel(defaultW, defaultH-statusBarHeight-defaultInputHeight),
+		input:        NewInputModel(defaultW),
+		statusbar:    NewStatusBarModel(modelName, defaultW),
+		spinner:      NewSpinnerModel(),
+		agentFn:      agentFn,
+		width:        defaultW,
+		height:       defaultH,
+	}
+	return m
+}
+
+const (
+	statusBarHeight    = 1
+	defaultInputHeight = 5 // textarea(3) + border(2)
+)
+
+// Init is called once at startup. It returns a command that fires a
+// WindowSizeMsg so the layout is initialised properly.
+func (m AppModel) Init() tea.Cmd {
+	return tea.Batch(
+		m.input.Init(),
+		// trigger an initial banner paint after the window size is known
+	)
+}
+
+// Update handles all incoming messages.
+func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+
+	// ── window resize ────────────────────────────────────────────────────────
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m = m.relayout()
+
+		// Add banner once (only when blocks is empty)
+		if len(m.conversation.blocks) == 0 {
+			m.conversation.AddBanner(bannerText)
+		}
+
+	// ── keyboard ─────────────────────────────────────────────────────────────
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			if m.cancelFn != nil {
+				m.cancelFn()
+			}
+			return m, tea.Quit
+
+		case tea.KeyEsc:
+			// Interrupt active streaming
+			if m.state != stateIdle && m.cancelFn != nil {
+				m.cancelFn()
+				m.cancelFn = nil
+				m.state = stateIdle
+				m.spinner.Stop()
+				m.conversation.FinalizeAssistant()
+				m.input.Enable()
+				m.statusbar.SetStreaming(false)
+			}
+			return m, nil
+		}
+
+	// ── user submitted text ──────────────────────────────────────────────────
+	case SubmitMsg:
+		if m.state != stateIdle {
+			return m, nil
+		}
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			return m, nil
+		}
+
+		m.conversation.AddUserMessage(text)
+		m.input.Disable()
+		m.state = stateWaitingForAgent
+		m.statusbar.SetStreaming(true)
+		cmds = append(cmds, m.spinner.Start())
+
+		if m.agentFn != nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			m.cancelFn = cancel
+			events := make(chan tea.Msg, 64)
+			go func() {
+				m.agentFn(ctx, text, events)
+				close(events)
+			}()
+			cmds = append(cmds, drainChannel(events))
+		} else {
+			// Stub: echo the message back
+			cmds = append(cmds, stubAgentCmd(text))
+		}
+
+	// ── agent stream events ──────────────────────────────────────────────────
+	case streamChunkWithChanMsg:
+		if m.state == stateWaitingForAgent {
+			m.state = stateStreaming
+			m.spinner.Stop()
+			m.conversation.StartAssistantMessage()
+		}
+		m.conversation.AppendChunk(msg.Text)
+		cmds = append(cmds, drainChannel(msg.ch))
+
+	case toolCallWithChanMsg:
+		if m.state == stateWaitingForAgent {
+			m.state = stateStreaming
+			m.spinner.Stop()
+		}
+		m.conversation.AddToolCall(msg.ID, msg.Name, msg.Args)
+		cmds = append(cmds, drainChannel(msg.ch))
+
+	case toolResultWithChanMsg:
+		m.conversation.AddToolResult(msg.ID, msg.Result, msg.IsError)
+		cmds = append(cmds, drainChannel(msg.ch))
+
+	// Plain versions (for external callers who don't use channel-draining)
+	case StreamChunkMsg:
+		if m.state == stateWaitingForAgent {
+			m.state = stateStreaming
+			m.spinner.Stop()
+			m.conversation.StartAssistantMessage()
+		}
+		m.conversation.AppendChunk(msg.Text)
+
+	case ToolCallMsg:
+		if m.state == stateWaitingForAgent {
+			m.state = stateStreaming
+			m.spinner.Stop()
+		}
+		m.conversation.AddToolCall(msg.ID, msg.Name, msg.Args)
+
+	case ToolResultMsg:
+		m.conversation.AddToolResult(msg.ID, msg.Result, msg.IsError)
+
+	case StreamDoneMsg:
+		m.conversation.FinalizeAssistant()
+		m.state = stateIdle
+		m.spinner.Stop()
+		m.input.Enable()
+		m.statusbar.SetStreaming(false)
+		if m.cancelFn != nil {
+			m.cancelFn()
+			m.cancelFn = nil
+		}
+
+	case StreamErrorMsg:
+		errText := fmt.Sprintf("error: %v", msg.Err)
+		m.conversation.AddToolResult("", errText, true)
+		m.conversation.FinalizeAssistant()
+		m.state = stateIdle
+		m.spinner.Stop()
+		m.input.Enable()
+		m.statusbar.SetStreaming(false)
+		if m.cancelFn != nil {
+			m.cancelFn()
+			m.cancelFn = nil
+		}
+	}
+
+	// ── delegate to sub-models ───────────────────────────────────────────────
+	{
+		var cmd tea.Cmd
+		m.conversation, cmd = m.conversation.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+	{
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+	{
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	return m, tea.Batch(cmds...)
+}
+
+// View renders the full terminal layout.
+//
+//	┌──────────────────────────────┐
+//	│  conversation (fills space)  │
+//	│                              │
+//	│  [spinner if waiting]        │
+//	├──────────────────────────────┤
+//	│  input (3-5 lines + border)  │
+//	├──────────────────────────────┤
+//	│  status bar (1 line)         │
+//	└──────────────────────────────┘
+func (m AppModel) View() string {
+	var sb strings.Builder
+
+	// conversation (may include spinner line at bottom)
+	convView := m.conversation.View()
+	if m.spinner.Active() {
+		convView += "\n" + m.spinner.View()
+	}
+	sb.WriteString(convView)
+	sb.WriteByte('\n')
+
+	// input box
+	sb.WriteString(m.input.View())
+	sb.WriteByte('\n')
+
+	// status bar (always last line)
+	sb.WriteString(m.statusbar.View())
+
+	return sb.String()
+}
+
+// relayout recalculates component sizes after a resize.
+func (m AppModel) relayout() AppModel {
+	inputH := m.input.Height()
+	convH := m.height - inputH - statusBarHeight
+	if convH < 1 {
+		convH = 1
+	}
+
+	m.conversation.SetSize(m.width, convH)
+	m.input.SetWidth(m.width)
+	m.statusbar.SetWidth(m.width)
+	return m
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// Internal channel-aware message wrappers so the Update loop can re-schedule
+// drainChannel after each event without the caller needing to know about it.
+
+type streamChunkWithChanMsg struct {
+	StreamChunkMsg
+	ch <-chan tea.Msg
+}
+
+type toolCallWithChanMsg struct {
+	ToolCallMsg
+	ch <-chan tea.Msg
+}
+
+type toolResultWithChanMsg struct {
+	ToolResultMsg
+	ch <-chan tea.Msg
+}
+
+// drainChannel reads the next message from ch and wraps it so the Update
+// loop knows to keep draining. Closes with StreamDoneMsg when ch is closed.
+func drainChannel(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return StreamDoneMsg{}
+		}
+		switch m := msg.(type) {
+		case StreamChunkMsg:
+			return streamChunkWithChanMsg{StreamChunkMsg: m, ch: ch}
+		case ToolCallMsg:
+			return toolCallWithChanMsg{ToolCallMsg: m, ch: ch}
+		case ToolResultMsg:
+			return toolResultWithChanMsg{ToolResultMsg: m, ch: ch}
+		default:
+			// StreamDoneMsg, StreamErrorMsg, PermissionRequestMsg, etc. pass through
+			return msg
+		}
+	}
+}
+
+// stubAgentCmd simulates an agent response for testing the UI without a real agent.
+func stubAgentCmd(input string) tea.Cmd {
+	return func() tea.Msg {
+		return StreamChunkMsg{Text: fmt.Sprintf("I received: %q\n\nThis is a stub response — wire up a real AgentFunc to connect to the LLM.", input)}
+	}
+}
+
+// Run is the entry point for launching the TUI program.
+func Run(modelName string, agentFn AgentFunc) error {
+	m := NewAppModel(modelName, agentFn)
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	_, err := p.Run()
+	return err
+}
