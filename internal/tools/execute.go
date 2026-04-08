@@ -50,7 +50,16 @@ type executeArgs struct {
 	Timeout int    `json:"timeout"`
 }
 
+// Timeout declares the default max duration for execute. The LLM can override
+// this per-call via the timeout parameter, but this is the ceiling used by the
+// harness when no per-call value is set.
+func (t *ExecuteTool) Timeout() time.Duration { return 10 * time.Minute }
+
 func (t *ExecuteTool) Run(args string) (string, error) {
+	return t.RunWithContext(context.Background(), args)
+}
+
+func (t *ExecuteTool) RunWithContext(ctx context.Context, args string) (string, error) {
 	var a executeArgs
 	if err := json.Unmarshal([]byte(args), &a); err != nil {
 		return "", fmt.Errorf("execute: invalid arguments: %w", err)
@@ -62,10 +71,11 @@ func (t *ExecuteTool) Run(args string) (string, error) {
 		a.Timeout = defaultExecTimeout
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(a.Timeout)*time.Second)
+	// Use the tighter of: parent context deadline or per-call timeout.
+	callCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Timeout)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.Command)
+	cmd := exec.CommandContext(callCtx, "sh", "-c", a.Command)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf

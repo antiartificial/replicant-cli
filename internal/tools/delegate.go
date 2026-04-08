@@ -82,9 +82,16 @@ type delegateInput struct {
 	Context   string `json:"context"`
 }
 
-// Run executes the delegation: looks up the child replicant, creates an agent,
-// runs it to completion, and returns the final text response.
+// Timeout declares the max duration for a delegation.
+func (d *DelegateTool) Timeout() time.Duration { return delegateTimeout }
+
+// Run executes the delegation without a parent context.
 func (d *DelegateTool) Run(args string) (string, error) {
+	return d.RunWithContext(context.Background(), args)
+}
+
+// RunWithContext executes the delegation with cancellation from the parent.
+func (d *DelegateTool) RunWithContext(ctx context.Context, args string) (string, error) {
 	var input delegateInput
 	if err := json.Unmarshal([]byte(args), &input); err != nil {
 		return "", fmt.Errorf("delegate: invalid args: %w", err)
@@ -158,8 +165,8 @@ func (d *DelegateTool) Run(args string) (string, error) {
 		agent.WithPermissionFn(childPermFn),
 	)
 
-	// Run the child with a timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), delegateTimeout)
+	// Run the child with a timeout derived from the parent context.
+	ctx, cancel := context.WithTimeout(ctx, delegateTimeout)
 	defer cancel()
 
 	events := make(chan agent.Event, 128)

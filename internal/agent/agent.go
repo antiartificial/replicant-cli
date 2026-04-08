@@ -73,6 +73,13 @@ func WithToolRunner(fn func(name string, args string) (string, error)) AgentOpti
 	return func(a *Agent) { a.toolRunner = fn }
 }
 
+// WithToolRunnerCtx registers a context-aware tool runner. When set, it takes
+// priority over the plain WithToolRunner callback. The context carries the
+// agent loop's cancellation and can be used for per-tool timeouts.
+func WithToolRunnerCtx(fn func(ctx context.Context, name string, args string) (string, error)) AgentOption {
+	return func(a *Agent) { a.toolRunnerCtx = fn }
+}
+
 // WithMaxTurns caps the number of ReAct loop iterations.
 func WithMaxTurns(n int) AgentOption {
 	return func(a *Agent) { a.maxTurns = n }
@@ -105,6 +112,7 @@ type Agent struct {
 	temperature      float64
 	tools            []ToolDef
 	toolRunner       func(name string, args string) (string, error)
+	toolRunnerCtx    func(ctx context.Context, name string, args string) (string, error)
 	permissionFn     func(name string, args string) (bool, error)
 	maxTurns         int
 	autoCompact      bool
@@ -272,7 +280,7 @@ func (a *Agent) runNonStreaming(ctx context.Context, messages []Message, events 
 			return
 		}
 
-		resultBlocks, stop := a.executeToolCalls(toolCalls, cumulativeUsage, events)
+		resultBlocks, stop := a.executeToolCalls(ctx, toolCalls, cumulativeUsage, events)
 		if stop {
 			return
 		}
@@ -450,7 +458,7 @@ func (a *Agent) runStreaming(ctx context.Context, sp StreamProvider, messages []
 		}
 
 		// Execute tool calls and build the tool_result user turn.
-		resultBlocks, stop := a.executeToolCalls(toolCalls, cumulativeUsage, events)
+		resultBlocks, stop := a.executeToolCalls(ctx, toolCalls, cumulativeUsage, events)
 		if stop {
 			return
 		}
@@ -474,7 +482,7 @@ func (a *Agent) runStreaming(ctx context.Context, sp StreamProvider, messages []
 // executeToolCalls runs permission checks and executes each tool call.
 // It returns the result content blocks and a stop flag. When stop is true
 // the caller must return immediately (a fatal error was emitted to events).
-func (a *Agent) executeToolCalls(toolCalls []ContentBlock, cumulativeUsage Usage, events chan<- Event) ([]ContentBlock, bool) {
+func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ContentBlock, cumulativeUsage Usage, events chan<- Event) ([]ContentBlock, bool) {
 	resultBlocks := make([]ContentBlock, 0, len(toolCalls))
 	for _, tc := range toolCalls {
 		// Check permission before running the tool.
@@ -504,7 +512,7 @@ func (a *Agent) executeToolCalls(toolCalls []ContentBlock, cumulativeUsage Usage
 			}
 		}
 
-		result, toolErr := a.runTool(tc.Name, string(tc.Input))
+		result, toolErr := a.runTool(ctx, tc.Name, string(tc.Input))
 		isErr := toolErr != nil
 
 		var resultText string
@@ -533,10 +541,10 @@ func (a *Agent) executeToolCalls(toolCalls []ContentBlock, cumulativeUsage Usage
 	return resultBlocks, false
 }
 
-// runTool executes a single tool call. If no toolRunner is registered it
-// returns an error so the model receives a graceful tool_result error.
-func (a *Agent) runTool(name, args string) (string, error) {
-	if a.toolRunner == nil {
+// runTool executes a single tool call. Prefers the context-aware runner when
+// available. If no runner is registered it returns a graceful error.
+func (a *Agent) runTool(ctx context.Context, name, args string) (string, error) {
+	if a.toolRunnerCtx == nil && a.toolRunner == nil {
 		return "", fmt.Errorf("no tool runner registered (tool: %s)", name)
 	}
 
@@ -545,5 +553,8 @@ func (a *Agent) runTool(name, args string) (string, error) {
 		return "", fmt.Errorf("tool %s: malformed JSON args: %s", name, args)
 	}
 
+	if a.toolRunnerCtx != nil {
+		return a.toolRunnerCtx(ctx, name, args)
+	}
 	return a.toolRunner(name, args)
 }

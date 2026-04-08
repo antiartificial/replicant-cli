@@ -216,13 +216,14 @@ func run(replicantName, modelOverride, resumeID string) error {
 		}
 	}
 
-	// Create the tool runner callback.
-	toolRunner := func(name string, args string) (string, error) {
+	// Create the context-aware tool runner callback. This threads the agent's
+	// context into tool execution so cancellation (Esc) and timeouts propagate.
+	toolRunnerCtx := func(ctx context.Context, name string, args string) (string, error) {
 		t, ok := toolRegistry.Get(name)
 		if !ok {
 			return "", fmt.Errorf("unknown tool: %s", name)
 		}
-		return t.Run(args)
+		return tools.RunTool(ctx, t, args)
 	}
 
 	// currentEventsCh is set by agentFn on each invocation so the permission
@@ -261,7 +262,7 @@ func run(replicantName, modelOverride, resumeID string) error {
 		agent.WithMaxTokens(def.MaxTokens),
 		agent.WithTemperature(def.Temperature),
 		agent.WithTools(toolDefs),
-		agent.WithToolRunner(toolRunner),
+		agent.WithToolRunnerCtx(toolRunnerCtx),
 		agent.WithMaxTurns(def.MaxTurns),
 		agent.WithPermissionFn(permFn),
 		agent.WithAutoCompact(agent.CompactThreshold(model)),
