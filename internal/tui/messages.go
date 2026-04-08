@@ -44,3 +44,14 @@ type PermissionResponseMsg struct {
 	ToolCallID string
 	Approved   bool
 }
+
+// CommandMsg is a local slash command that the TUI handles without sending to the agent.
+type CommandMsg struct {
+	Command string
+	Args    string
+}
+
+// AutonomyChangedMsg notifies the TUI that the autonomy level was changed.
+type AutonomyChangedMsg struct {
+	Level string
+}

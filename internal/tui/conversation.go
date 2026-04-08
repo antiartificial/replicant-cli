@@ -10,6 +10,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ReplayEntry is a single item replayed into the conversation view when resuming
+// a previous session. It mirrors SessionEntry but lives in the tui package so
+// that tui has no import cycle dependency on agent.
+type ReplayEntry struct {
+	Type     string // "user", "assistant", "tool_call", "tool_result"
+	Content  string
+	ToolName string
+	ToolArgs string
+	ToolID   string
+	IsError  bool
+}
+
 // messageKind classifies the role of a rendered conversation block.
 type messageKind int
 
@@ -166,6 +178,39 @@ func (m *ConversationModel) AddToolResult(id, result string, isError bool) {
 		id:        id,
 	})
 	m.rebuildViewport()
+}
+
+// ReplayHistory adds previously loaded session entries to the conversation view.
+// It should be called once after the banner is shown, before the user's first input.
+func (m *ConversationModel) ReplayHistory(entries []ReplayEntry) {
+	inAssistant := false
+	for _, e := range entries {
+		switch e.Type {
+		case "user":
+			if inAssistant {
+				m.FinalizeAssistant()
+				inAssistant = false
+			}
+			m.AddUserMessage(e.Content)
+		case "assistant":
+			if !inAssistant {
+				m.StartAssistantMessage()
+				inAssistant = true
+			}
+			m.AppendChunk(e.Content)
+		case "tool_call":
+			if inAssistant {
+				m.FinalizeAssistant()
+				inAssistant = false
+			}
+			m.AddToolCall(e.ToolID, e.ToolName, e.ToolArgs)
+		case "tool_result":
+			m.AddToolResult(e.ToolID, e.Content, e.IsError)
+		}
+	}
+	if inAssistant {
+		m.FinalizeAssistant()
+	}
 }
 
 // rebuildViewport concatenates all rendered blocks and refreshes the viewport content,

@@ -20,6 +20,8 @@ const (
 	EventDone
 	// EventError signals that a fatal error stopped the loop.
 	EventError
+	// EventCompact signals that the conversation history was compacted.
+	EventCompact
 )
 
 // Event is emitted on the events channel during a Run call.
@@ -29,10 +31,12 @@ type Event struct {
 	ToolName string // EventToolCall: name of the tool
 	ToolArgs string // EventToolCall: JSON-encoded tool input
 	ToolID   string // EventToolCall / EventToolResult: tool_use id
-	Result   string // EventToolResult: tool output text
-	IsError  bool   // EventToolResult / EventError: true when the operation failed
-	Error    error  // EventError: the underlying error
-	Usage    Usage  // cumulative token usage, updated after each turn
+	Result        string // EventToolResult: tool output text
+	IsError       bool   // EventToolResult / EventError: true when the operation failed
+	Error         error  // EventError: the underlying error
+	Usage         Usage  // cumulative token usage, updated after each turn
+	CompactedFrom int    // EventCompact: number of messages before compaction
+	CompactedTo   int    // EventCompact: number of messages after compaction
 }
 
 // AgentOption is a functional option for NewAgent.
@@ -82,17 +86,29 @@ func WithPermissionFn(fn func(name, args string) (bool, error)) AgentOption {
 	return func(a *Agent) { a.permissionFn = fn }
 }
 
+// WithAutoCompact enables automatic context compaction when the estimated
+// token count of the message history exceeds threshold. A threshold of 0
+// disables auto-compaction.
+func WithAutoCompact(threshold int) AgentOption {
+	return func(a *Agent) {
+		a.autoCompact = threshold > 0
+		a.compactThreshold = threshold
+	}
+}
+
 // Agent runs the ReAct (Reasoning + Acting) loop against a Provider.
 type Agent struct {
-	provider     Provider
-	systemPrompt string
-	model        string
-	maxTokens    int
-	temperature  float64
-	tools        []ToolDef
-	toolRunner   func(name string, args string) (string, error)
-	permissionFn func(name string, args string) (bool, error)
-	maxTurns     int
+	provider         Provider
+	systemPrompt     string
+	model            string
+	maxTokens        int
+	temperature      float64
+	tools            []ToolDef
+	toolRunner       func(name string, args string) (string, error)
+	permissionFn     func(name string, args string) (bool, error)
+	maxTurns         int
+	autoCompact      bool
+	compactThreshold int
 }
 
 // NewAgent constructs an Agent with the given provider and options.
@@ -141,6 +157,36 @@ func (a *Agent) Run(ctx context.Context, userMessage string, history []Message, 
 	a.runNonStreaming(ctx, messages, events)
 }
 
+// maybeCompact checks whether the message history exceeds the compaction
+// threshold and, if so, compacts it in-place. It returns the (possibly new)
+// message slice. A non-nil error is fatal; callers should emit EventError and
+// return.
+func (a *Agent) maybeCompact(ctx context.Context, messages []Message, cumulativeUsage Usage, events chan<- Event) ([]Message, Usage, bool) {
+	if !a.autoCompact || EstimateTokens(messages) < a.compactThreshold {
+		return messages, cumulativeUsage, false
+	}
+
+	from := len(messages)
+	// Keep the 10 most recent messages verbatim.
+	compacted, compactUsage, err := CompactHistory(ctx, a.provider, a.model, messages, 10)
+	if err != nil {
+		events <- Event{Type: EventError, IsError: true, Error: fmt.Errorf("auto-compact: %w", err), Usage: cumulativeUsage}
+		return messages, cumulativeUsage, true
+	}
+
+	cumulativeUsage.InputTokens += compactUsage.InputTokens
+	cumulativeUsage.OutputTokens += compactUsage.OutputTokens
+
+	events <- Event{
+		Type:          EventCompact,
+		CompactedFrom: from,
+		CompactedTo:   len(compacted),
+		Usage:         cumulativeUsage,
+	}
+
+	return compacted, cumulativeUsage, false
+}
+
 // runNonStreaming runs the ReAct loop using the non-streaming Complete path.
 func (a *Agent) runNonStreaming(ctx context.Context, messages []Message, events chan<- Event) {
 	var cumulativeUsage Usage
@@ -148,6 +194,13 @@ func (a *Agent) runNonStreaming(ctx context.Context, messages []Message, events 
 	for turn := 0; turn < a.maxTurns; turn++ {
 		if ctx.Err() != nil {
 			events <- Event{Type: EventError, IsError: true, Error: ctx.Err(), Usage: cumulativeUsage}
+			return
+		}
+
+		// Auto-compact if the history is getting too large.
+		var stop bool
+		messages, cumulativeUsage, stop = a.maybeCompact(ctx, messages, cumulativeUsage, events)
+		if stop {
 			return
 		}
 
@@ -255,6 +308,13 @@ func (a *Agent) runStreaming(ctx context.Context, sp StreamProvider, messages []
 	for turn := 0; turn < a.maxTurns; turn++ {
 		if ctx.Err() != nil {
 			events <- Event{Type: EventError, IsError: true, Error: ctx.Err(), Usage: cumulativeUsage}
+			return
+		}
+
+		// Auto-compact if the history is getting too large.
+		var stop bool
+		messages, cumulativeUsage, stop = a.maybeCompact(ctx, messages, cumulativeUsage, events)
+		if stop {
 			return
 		}
 

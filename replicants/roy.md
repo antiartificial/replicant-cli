@@ -2,7 +2,7 @@
 name: roy
 description: Architecture and planning specialist
 model: anthropic/claude-opus-4-20250514
-tools: [read_file, glob, grep]
+tools: [read_file, glob, grep, delegate]
 max_turns: 20
 temperature: 0.5
 ---

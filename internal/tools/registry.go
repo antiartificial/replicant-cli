@@ -20,6 +20,13 @@ func NewRegistry() *Registry {
 	return r
 }
 
+// Register adds or replaces a tool in the registry.
+// This allows external code (e.g. main.go) to inject tools that require
+// dependencies not available at construction time.
+func (r *Registry) Register(t Tool) {
+	r.tools[t.Name()] = t
+}
+
 // Get returns a tool by name and whether it was found.
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]

@@ -10,21 +10,28 @@ import (
 
 // StatusBarModel tracks session statistics and renders the bottom bar.
 type StatusBarModel struct {
-	modelName   string
-	tokenIn     int
-	tokenOut    int
-	startTime   time.Time
-	width       int
-	streaming   bool
+	modelName string
+	autonomy  string
+	tokenIn   int
+	tokenOut  int
+	startTime time.Time
+	width     int
+	streaming bool
 }
 
 // NewStatusBarModel creates a status bar for the given model name.
 func NewStatusBarModel(modelName string, width int) StatusBarModel {
 	return StatusBarModel{
 		modelName: modelName,
+		autonomy:  "off",
 		startTime: time.Now(),
 		width:     width,
 	}
+}
+
+// SetAutonomy updates the displayed autonomy level.
+func (s *StatusBarModel) SetAutonomy(level string) {
+	s.autonomy = level
 }
 
 // SetWidth updates the bar width.
@@ -58,6 +65,8 @@ func (s StatusBarModel) View() string {
 
 	model := StyleStatusBarDim.Render(s.modelName)
 
+	autonomy := StyleStatusBarDim.Render("auto:" + s.autonomy)
+
 	tokens := StyleStatusBarDim.Render(
 		fmt.Sprintf("in:%d out:%d", s.tokenIn, s.tokenOut),
 	)
@@ -69,6 +78,8 @@ func (s StatusBarModel) View() string {
 		streamIndicator,
 		StyleStatusBarDim.Render(" │ "),
 		model,
+		StyleStatusBarDim.Render(" │ "),
+		autonomy,
 		StyleStatusBarDim.Render(" │ "),
 		tokens,
 		StyleStatusBarDim.Render(" │ "),

@@ -23,6 +23,12 @@ const (
 // StreamErrorMsg) onto events, then return.
 type AgentFunc func(ctx context.Context, message string, events chan<- tea.Msg)
 
+// CommandHandler processes slash commands typed by the user. It receives the
+// command name (without the leading slash) and any trailing arguments. It
+// returns a response string that is shown as a system message in the
+// conversation, or an empty string to show nothing.
+type CommandHandler func(command string, args string) string
+
 // banner shown at startup
 const bannerText = " ╱╲  REPLICANT\n╱  ╲ v0.1.0"
 
@@ -35,6 +41,7 @@ type AppModel struct {
 
 	state      agentState
 	agentFn    AgentFunc
+	cmdHandler CommandHandler
 	cancelFn   context.CancelFunc
 
 	// pendingPermission is set while we are waiting for the user to respond
@@ -44,24 +51,43 @@ type AppModel struct {
 	// a permission response is sent.
 	pendingEventsCh <-chan tea.Msg
 
+	// replayEntries holds session history to replay after the first resize.
+	replayEntries []ReplayEntry
+
 	width  int
 	height int
 }
 
 // NewAppModel constructs the root model. agentFn may be nil for a stub UI.
-func NewAppModel(modelName string, agentFn AgentFunc) AppModel {
+// cmdHandler may be nil; if provided, slash commands are dispatched to it
+// instead of being sent to the agent. initialAutonomy is the autonomy level
+// string displayed in the status bar at startup (e.g. "off", "normal").
+func NewAppModel(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string) AppModel {
 	// Start with a small default size; real size comes from WindowSizeMsg.
 	const defaultW, defaultH = 80, 24
+
+	sb := NewStatusBarModel(modelName, defaultW)
+	if initialAutonomy != "" {
+		sb.SetAutonomy(initialAutonomy)
+	}
 
 	m := AppModel{
 		conversation: NewConversationModel(defaultW, defaultH-statusBarHeight-defaultInputHeight),
 		input:        NewInputModel(defaultW),
-		statusbar:    NewStatusBarModel(modelName, defaultW),
+		statusbar:    sb,
 		spinner:      NewSpinnerModel(),
 		agentFn:      agentFn,
+		cmdHandler:   cmdHandler,
 		width:        defaultW,
 		height:       defaultH,
 	}
+	return m
+}
+
+// WithReplayEntries returns a copy of m with the given replay entries set.
+// They will be replayed into the conversation view after the first resize.
+func (m AppModel) WithReplayEntries(entries []ReplayEntry) AppModel {
+	m.replayEntries = entries
 	return m
 }
 
@@ -91,9 +117,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m = m.relayout()
 
-		// Add banner once (only when blocks is empty)
+		// Add banner once (only when blocks is empty) then replay history.
 		if len(m.conversation.blocks) == 0 {
 			m.conversation.AddBanner(bannerText)
+			if len(m.replayEntries) > 0 {
+				m.conversation.ReplayHistory(m.replayEntries)
+				m.replayEntries = nil
+			}
 		}
 
 	// ── keyboard ─────────────────────────────────────────────────────────────
@@ -166,6 +196,30 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
+			return m, nil
+		}
+
+		// Check for slash commands — handle locally without sending to agent.
+		if strings.HasPrefix(text, "/") {
+			m.input.Enable()
+			cmd, args, _ := strings.Cut(strings.TrimPrefix(text, "/"), " ")
+			cmd = strings.ToLower(strings.TrimSpace(cmd))
+			args = strings.TrimSpace(args)
+
+			// Built-in /quit handled here directly.
+			if cmd == "quit" || cmd == "q" {
+				return m, tea.Quit
+			}
+
+			// Dispatch to handler if available.
+			if m.cmdHandler != nil {
+				response := m.cmdHandler(cmd, args)
+				if response != "" {
+					m.conversation.AddBanner(response)
+				}
+			} else {
+				m.conversation.AddBanner(fmt.Sprintf("unknown command: /%s", cmd))
+			}
 			return m, nil
 		}
 
@@ -262,6 +316,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateWaitingForPermission
 		m.spinner.Stop()
 		m.statusbar.SetStreaming(false)
+
+	case AutonomyChangedMsg:
+		m.statusbar.SetAutonomy(msg.Level)
 
 	case permissionRequestWithChanMsg:
 		// Same as PermissionRequestMsg but we also have the events channel so
@@ -398,8 +455,13 @@ func stubAgentCmd(input string) tea.Cmd {
 }
 
 // Run is the entry point for launching the TUI program.
-func Run(modelName string, agentFn AgentFunc) error {
-	m := NewAppModel(modelName, agentFn)
+// replayEntries may be nil; when non-nil, the session history is replayed
+// into the conversation view before the user's first input.
+func Run(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replayEntries []ReplayEntry) error {
+	m := NewAppModel(modelName, agentFn, cmdHandler, initialAutonomy)
+	if len(replayEntries) > 0 {
+		m = m.WithReplayEntries(replayEntries)
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
