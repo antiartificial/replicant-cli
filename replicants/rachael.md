@@ -2,7 +2,7 @@
 name: rachael
 description: Autonomous coding agent for completing objectives
 model: anthropic/claude-sonnet-4-20250514
-tools: [read_file, edit_file, execute, glob, grep, delegate]
+tools: [read_file, edit_file, execute, glob, grep, delegate, remember, recall]
 max_turns: 100
 temperature: 0.3
 max_tokens: 16384

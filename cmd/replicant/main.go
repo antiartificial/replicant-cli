@@ -11,6 +11,7 @@ import (
 
 	"github.com/antiartificial/replicant/internal/agent"
 	"github.com/antiartificial/replicant/internal/config"
+	"github.com/antiartificial/replicant/internal/memory"
 	"github.com/antiartificial/replicant/internal/permission"
 	"github.com/antiartificial/replicant/internal/replicant"
 	"github.com/antiartificial/replicant/internal/tools"
@@ -182,6 +183,17 @@ func run(replicantName, modelOverride, resumeID string) error {
 	// Set up tools.
 	toolRegistry := tools.NewRegistry()
 
+	// Open the agent memory store. Log a warning on error but don't abort —
+	// the agent can still function without memory.
+	mem, memErr := memory.New(cfg.MemoryDir)
+	if memErr != nil {
+		fmt.Fprintf(os.Stderr, "replicant: memory unavailable: %v\n", memErr)
+	} else {
+		defer mem.Close()
+		toolRegistry.Register(tools.NewRememberTool(mem))
+		toolRegistry.Register(tools.NewRecallTool(mem))
+	}
+
 	// Wire up the delegate tool so replicants can spawn child agents.
 	// The provider factory closure captures the API keys from config.
 	delegateTool := tools.NewDelegateTool(reg, toolRegistry, func(model string) (agent.Provider, string, error) {
@@ -252,7 +264,7 @@ func run(replicantName, modelOverride, resumeID string) error {
 		agent.WithToolRunner(toolRunner),
 		agent.WithMaxTurns(def.MaxTurns),
 		agent.WithPermissionFn(permFn),
-		agent.WithAutoCompact(100000),
+		agent.WithAutoCompact(agent.CompactThreshold(model)),
 	)
 
 	// Build the TUI agent function that bridges agent events to bubbletea messages.
@@ -260,6 +272,9 @@ func run(replicantName, modelOverride, resumeID string) error {
 		// Expose the events channel to the permission function for this turn.
 		currentEventsCh = events
 		defer func() { currentEventsCh = nil }()
+
+		// Track the last assistant reply so we can summarise the turn for memory.
+		var lastAssistantText string
 
 		// Log the user message to the session.
 		_ = session.Append(agent.SessionEntry{
@@ -283,6 +298,7 @@ func run(replicantName, modelOverride, resumeID string) error {
 					Role:    "assistant",
 					Content: ev.Text,
 				})
+				lastAssistantText += ev.Text
 				events <- tui.StreamChunkMsg{Text: ev.Text}
 			case agent.EventToolCall:
 				_ = session.Append(agent.SessionEntry{
@@ -315,6 +331,11 @@ func run(replicantName, modelOverride, resumeID string) error {
 						Content: []agent.ContentBlock{{Type: "text", Text: message}},
 					},
 				)
+				// Auto-store a brief session summary in agent memory.
+				if mem != nil && lastAssistantText != "" {
+					summary := buildSessionSummary(message, lastAssistantText)
+					_ = mem.RememberSession(ctx, session.ID, def.Name, summary)
+				}
 				// StreamDoneMsg is sent by the TUI channel drainer.
 			case agent.EventCompact:
 				_ = session.Append(agent.SessionEntry{
@@ -377,6 +398,21 @@ func run(replicantName, modelOverride, resumeID string) error {
 
 	// Launch the TUI.
 	return tui.Run(model, agentFn, tui.CommandHandler(cmdHandler), autonomyLevelName(*autonomyLevel), replayEntries)
+}
+
+// buildSessionSummary creates a brief summary of a single agent turn for
+// storage in agent memory. It truncates both halves to keep the stored text
+// manageable.
+func buildSessionSummary(userMsg, assistantReply string) string {
+	const maxLen = 300
+	truncate := func(s string) string {
+		s = strings.TrimSpace(s)
+		if len(s) > maxLen {
+			s = s[:maxLen] + "…"
+		}
+		return s
+	}
+	return fmt.Sprintf("User: %s\nAssistant: %s", truncate(userMsg), truncate(assistantReply))
 }
 
 // parseAutonomyLevel converts a config string to a permission.AutonomyLevel.

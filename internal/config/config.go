@@ -12,6 +12,7 @@ type Config struct {
 	OpenAIKey    string
 	DefaultModel string
 	SessionDir   string // defaults to ~/.replicant/sessions/
+	MemoryDir    string // defaults to ~/.replicant/memory/
 	Autonomy     string // "off", "normal", "high", "full"
 }
 
@@ -34,6 +35,7 @@ func Load() (*Config, error) {
 		OpenAIKey:    os.Getenv("OPENAI_API_KEY"),
 		DefaultModel: os.Getenv("REPLICANT_MODEL"),
 		SessionDir:   filepath.Join(home, ".replicant", "sessions"),
+		MemoryDir:    filepath.Join(home, ".replicant", "memory"),
 		Autonomy:     os.Getenv("REPLICANT_AUTONOMY"),
 	}
 
@@ -47,6 +49,10 @@ func Load() (*Config, error) {
 
 	if err := os.MkdirAll(cfg.SessionDir, 0o700); err != nil {
 		return nil, fmt.Errorf("config: create session dir %s: %w", cfg.SessionDir, err)
+	}
+
+	if err := os.MkdirAll(cfg.MemoryDir, 0o700); err != nil {
+		return nil, fmt.Errorf("config: create memory dir %s: %w", cfg.MemoryDir, err)
 	}
 
 	return cfg, nil

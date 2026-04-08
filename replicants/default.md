@@ -2,7 +2,7 @@
 name: deckard
 description: General-purpose coding replicant
 model: anthropic/claude-sonnet-4-20250514
-tools: [read_file, edit_file, execute, glob, grep]
+tools: [read_file, edit_file, execute, glob, grep, remember, recall]
 max_turns: 50
 temperature: 0.3
 ---
