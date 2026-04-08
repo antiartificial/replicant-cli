@@ -12,11 +12,24 @@ type ReplicantDef struct {
 	Temperature float64  `yaml:"temperature"`  // sampling temperature
 	MaxTokens   int      `yaml:"max_tokens"`   // max output tokens per turn
 
+	// MCPServers declares per-replicant MCP server connections. The map key is
+	// the server name used to prefix tool names (e.g. "github" → "mcp:github:*").
+	MCPServers map[string]MCPServerConfig `yaml:"mcp_servers"`
+
 	// From markdown body (after frontmatter)
 	SystemPrompt string `yaml:"-"`
 
 	// Source file path
 	SourcePath string `yaml:"-"`
+}
+
+// MCPServerConfig holds per-replicant MCP server connection parameters.
+type MCPServerConfig struct {
+	Command   string            `yaml:"command,omitempty"`
+	Args      []string          `yaml:"args,omitempty"`
+	Env       map[string]string `yaml:"env,omitempty"`
+	URL       string            `yaml:"url,omitempty"`
+	Transport string            `yaml:"transport"`
 }
 
 // Default values for optional fields.

@@ -13,6 +13,7 @@ type Config struct {
 	DefaultModel string
 	SessionDir   string // defaults to ~/.replicant/sessions/
 	MemoryDir    string // defaults to ~/.replicant/memory/
+	MissionDir   string // defaults to ~/.replicant/missions/
 	Autonomy     string // "off", "normal", "high", "full"
 }
 
@@ -36,6 +37,7 @@ func Load() (*Config, error) {
 		DefaultModel: os.Getenv("REPLICANT_MODEL"),
 		SessionDir:   filepath.Join(home, ".replicant", "sessions"),
 		MemoryDir:    filepath.Join(home, ".replicant", "memory"),
+		MissionDir:   filepath.Join(home, ".replicant", "missions"),
 		Autonomy:     os.Getenv("REPLICANT_AUTONOMY"),
 	}
 
@@ -53,6 +55,10 @@ func Load() (*Config, error) {
 
 	if err := os.MkdirAll(cfg.MemoryDir, 0o700); err != nil {
 		return nil, fmt.Errorf("config: create memory dir %s: %w", cfg.MemoryDir, err)
+	}
+
+	if err := os.MkdirAll(cfg.MissionDir, 0o700); err != nil {
+		return nil, fmt.Errorf("config: create mission dir %s: %w", cfg.MissionDir, err)
 	}
 
 	return cfg, nil

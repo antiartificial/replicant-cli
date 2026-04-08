@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +13,8 @@ import (
 	"github.com/antiartificial/replicant/internal/agent"
 	"github.com/antiartificial/replicant/internal/config"
 	"github.com/antiartificial/replicant/internal/memory"
+	internalmcp "github.com/antiartificial/replicant/internal/mcp"
+	"github.com/antiartificial/replicant/internal/mission"
 	"github.com/antiartificial/replicant/internal/permission"
 	"github.com/antiartificial/replicant/internal/replicant"
 	"github.com/antiartificial/replicant/internal/tools"
@@ -183,6 +186,43 @@ func run(replicantName, modelOverride, resumeID string) error {
 	// Set up tools.
 	toolRegistry := tools.NewRegistry()
 
+	// Wire up MCP servers. Failures are non-fatal: we log warnings and continue.
+	mcpManager := internalmcp.NewManager()
+
+	// Load global MCP config from ~/.replicant/mcp.json (optional).
+	globalMCPPath := filepath.Join(os.Getenv("HOME"), ".replicant", "mcp.json")
+	if _, statErr := os.Stat(globalMCPPath); statErr == nil {
+		if loadErr := mcpManager.LoadConfig(globalMCPPath); loadErr != nil {
+			fmt.Fprintf(os.Stderr, "replicant: mcp global config: %v\n", loadErr)
+		}
+	}
+
+	// Add per-replicant MCP servers from the replicant definition.
+	for name, srv := range def.MCPServers {
+		addErr := mcpManager.AddServer(name, internalmcp.ServerConfig{
+			Command:   srv.Command,
+			Args:      srv.Args,
+			Env:       srv.Env,
+			URL:       srv.URL,
+			Transport: srv.Transport,
+		})
+		if addErr != nil {
+			fmt.Fprintf(os.Stderr, "replicant: mcp add server %q: %v\n", name, addErr)
+		}
+	}
+
+	// Connect all MCP servers; warn about individual failures but keep going.
+	connectCtx := context.Background()
+	if connectErr := mcpManager.ConnectAll(connectCtx); connectErr != nil {
+		fmt.Fprintf(os.Stderr, "replicant: mcp connect: %v\n", connectErr)
+	}
+	defer mcpManager.Close()
+
+	// Register all MCP tool adapters so they are available to the agent.
+	for _, adapter := range mcpManager.AllTools() {
+		toolRegistry.Register(adapter)
+	}
+
 	// Open the agent memory store. Log a warning on error but don't abort —
 	// the agent can still function without memory.
 	mem, memErr := memory.New(cfg.MemoryDir)
@@ -211,6 +251,13 @@ func run(replicantName, modelOverride, resumeID string) error {
 	// with inline system prompts at runtime.
 	spawnTool := tools.NewSpawnTool(toolRegistry, providerFactory, model)
 	toolRegistry.Register(spawnTool)
+
+	// Wire up the mission tool so orchestrators can plan and run structured
+	// multi-milestone missions with validation contracts.
+	missionStore := mission.NewStore(cfg.MissionDir)
+	missionEngine := mission.NewEngine(tools.NewRegistryAdapter(toolRegistry), providerFactory, model, missionStore)
+	missionTool := tools.NewMissionTool(missionEngine, missionStore)
+	toolRegistry.Register(missionTool)
 
 	resolvedTools := toolRegistry.Resolve(def.Tools)
 
