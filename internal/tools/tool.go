@@ -34,6 +34,18 @@ type ContextTool interface {
 	RunWithContext(ctx context.Context, args string) (string, error)
 }
 
+// StreamingTool is a tool that can push partial output while running.
+// This is useful for long-running tools like claude code, build commands,
+// or test suites where showing progress matters.
+//
+// The output channel receives partial output lines during execution. The final
+// return value is the complete result (or a summary). The channel is NOT closed
+// by the tool; the caller closes it.
+type StreamingTool interface {
+	ContextTool
+	RunStreaming(ctx context.Context, args string, output chan<- string) (string, error)
+}
+
 // ToolTimeout returns the maximum duration a tool should be allowed to run.
 // Tools that implement TimeoutTool declare their own limit. All others get
 // the default (2 minutes).

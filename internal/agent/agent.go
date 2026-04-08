@@ -22,6 +22,8 @@ const (
 	EventError
 	// EventCompact signals that the conversation history was compacted.
 	EventCompact
+	// EventToolProgress carries a partial output line from a streaming tool.
+	EventToolProgress
 )
 
 // Event is emitted on the events channel during a Run call.
@@ -37,6 +39,7 @@ type Event struct {
 	Usage         Usage  // cumulative token usage, updated after each turn
 	CompactedFrom int    // EventCompact: number of messages before compaction
 	CompactedTo   int    // EventCompact: number of messages after compaction
+	ProgressOutput string // EventToolProgress: partial output line from a streaming tool
 }
 
 // AgentOption is a functional option for NewAgent.
@@ -103,6 +106,23 @@ func WithAutoCompact(threshold int) AgentOption {
 	}
 }
 
+// ToolStreamResult is the return type of a ToolStreamer callback.
+type ToolStreamResult struct {
+	Result string
+	Err    error
+}
+
+// WithToolStreamer registers a callback that checks if a tool supports
+// streaming and runs it with progress output. When set and the callback
+// returns a non-nil ToolStreamResult, it is used instead of toolRunnerCtx.
+// Progress channel items are emitted as EventToolProgress events.
+//
+// The callback should return nil (zero value) when the named tool does not
+// support streaming, allowing the agent to fall through to toolRunnerCtx.
+func WithToolStreamer(fn func(ctx context.Context, name, args string, progress chan<- string) *ToolStreamResult) AgentOption {
+	return func(a *Agent) { a.toolStreamer = fn }
+}
+
 // Agent runs the ReAct (Reasoning + Acting) loop against a Provider.
 type Agent struct {
 	provider         Provider
@@ -113,6 +133,7 @@ type Agent struct {
 	tools            []ToolDef
 	toolRunner       func(name string, args string) (string, error)
 	toolRunnerCtx    func(ctx context.Context, name string, args string) (string, error)
+	toolStreamer      func(ctx context.Context, name, args string, progress chan<- string) *ToolStreamResult
 	permissionFn     func(name string, args string) (bool, error)
 	maxTurns         int
 	autoCompact      bool
@@ -512,7 +533,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ContentBlock, 
 			}
 		}
 
-		result, toolErr := a.runTool(ctx, tc.Name, string(tc.Input))
+		result, toolErr := a.runTool(ctx, tc.Name, tc.ID, string(tc.Input), cumulativeUsage, events)
 		isErr := toolErr != nil
 
 		var resultText string
@@ -541,16 +562,46 @@ func (a *Agent) executeToolCalls(ctx context.Context, toolCalls []ContentBlock, 
 	return resultBlocks, false
 }
 
-// runTool executes a single tool call. Prefers the context-aware runner when
-// available. If no runner is registered it returns a graceful error.
-func (a *Agent) runTool(ctx context.Context, name, args string) (string, error) {
-	if a.toolRunnerCtx == nil && a.toolRunner == nil {
+// runTool executes a single tool call. When toolStreamer is set it is tried
+// first; if it returns nil (tool doesn't support streaming) the call falls
+// through to toolRunnerCtx / toolRunner. Progress lines from streaming tools
+// are emitted as EventToolProgress events.
+func (a *Agent) runTool(ctx context.Context, name, id, args string, cumulativeUsage Usage, events chan<- Event) (string, error) {
+	if a.toolRunnerCtx == nil && a.toolRunner == nil && a.toolStreamer == nil {
 		return "", fmt.Errorf("no tool runner registered (tool: %s)", name)
 	}
 
 	// Validate that args is well-formed JSON before passing to the runner.
 	if args != "" && !json.Valid([]byte(args)) {
 		return "", fmt.Errorf("tool %s: malformed JSON args: %s", name, args)
+	}
+
+	// Try the streaming path first.
+	if a.toolStreamer != nil {
+		progress := make(chan string, 32)
+		// Drain progress in a goroutine that emits EventToolProgress events.
+		progressDone := make(chan struct{})
+		go func() {
+			defer close(progressDone)
+			for line := range progress {
+				events <- Event{
+					Type:           EventToolProgress,
+					ToolID:         id,
+					ToolName:       name,
+					ProgressOutput: line,
+					Usage:          cumulativeUsage,
+				}
+			}
+		}()
+
+		streamRes := a.toolStreamer(ctx, name, args, progress)
+		close(progress)
+		<-progressDone
+
+		if streamRes != nil {
+			return streamRes.Result, streamRes.Err
+		}
+		// streamRes == nil means tool doesn't support streaming; fall through.
 	}
 
 	if a.toolRunnerCtx != nil {

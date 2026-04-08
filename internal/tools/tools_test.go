@@ -1,12 +1,14 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/antiartificial/replicant/internal/permission"
 )
@@ -307,13 +309,19 @@ func TestExecute_ExitCode(t *testing.T) {
 }
 
 func TestExecute_Timeout(t *testing.T) {
+	start := time.Now()
 	tool := &ExecuteTool{}
 	result, err := tool.Run(toJSON(t, map[string]any{
 		"command": "sleep 10",
 		"timeout": 1,
 	}))
+	elapsed := time.Since(start)
+
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("timed-out command took too long: %v (want <3s)", elapsed)
 	}
 	// Should have a non-zero exit code indicating timeout/kill.
 	if strings.Contains(result, "exit_code: 0") {
@@ -684,5 +692,150 @@ func TestExecute_WorkingDirectory(t *testing.T) {
 	}
 	if !strings.Contains(result, "exit_code: 0") {
 		t.Errorf("expected successful ls, got: %s", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Timeout / context / RunTool tests
+// ---------------------------------------------------------------------------
+
+// contextToolStub is a minimal ContextTool used in tests.
+type contextToolStub struct {
+	customTestTool
+	runFn func(ctx context.Context, args string) (string, error)
+}
+
+func (c *contextToolStub) RunWithContext(ctx context.Context, args string) (string, error) {
+	return c.runFn(ctx, args)
+}
+
+// TestExecute_ContextCancellation passes a pre-cancelled context to a
+// ContextTool and verifies that the returned error is ctx.Err().
+func TestExecute_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	tool := &contextToolStub{
+		customTestTool: customTestTool{name: "stub"},
+		runFn: func(ctx context.Context, args string) (string, error) {
+			// Respect context cancellation.
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			default:
+				return "ok", nil
+			}
+		},
+	}
+
+	_, err := tool.RunWithContext(ctx, "{}")
+	if err == nil {
+		t.Fatal("expected an error from a pre-cancelled context")
+	}
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+}
+
+// slowPlainTool is a plain Tool (no ContextTool) that sleeps.
+type slowPlainTool struct {
+	customTestTool
+	sleep time.Duration
+}
+
+func (s *slowPlainTool) Run(_ string) (string, error) {
+	time.Sleep(s.sleep)
+	return "finished", nil
+}
+
+// TestRunTool_ContextTimeout verifies that RunTool enforces context deadlines
+// on plain (non-ContextTool) tools by returning context.DeadlineExceeded.
+func TestRunTool_ContextTimeout(t *testing.T) {
+	slow := &slowPlainTool{
+		customTestTool: customTestTool{name: "slow"},
+		sleep:          5 * time.Second,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := RunTool(ctx, slow, "{}")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error from deadline-exceeded context")
+	}
+	if err != context.DeadlineExceeded {
+		t.Errorf("expected context.DeadlineExceeded, got: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("RunTool took too long: %v (deadline was 100ms)", elapsed)
+	}
+}
+
+// TestRunTool_ContextTool verifies RunTool calls RunWithContext when available.
+func TestRunTool_ContextTool(t *testing.T) {
+	var ctxReceived context.Context
+	tool := &contextToolStub{
+		customTestTool: customTestTool{name: "ctx_tool"},
+		runFn: func(ctx context.Context, args string) (string, error) {
+			ctxReceived = ctx
+			return "ok", nil
+		},
+	}
+
+	ctx := context.Background()
+	result, err := RunTool(ctx, tool, "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("expected 'ok', got %q", result)
+	}
+	if ctxReceived != ctx {
+		t.Error("RunTool should pass the context to RunWithContext")
+	}
+}
+
+// TestRunTool_PlainTool verifies RunTool wraps plain (non-ContextTool) tools.
+func TestRunTool_PlainTool(t *testing.T) {
+	tool := &customTestTool{name: "plain"}
+	result, err := RunTool(context.Background(), tool, "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("expected 'ok', got %q", result)
+	}
+}
+
+// TestGetTimeout_Default verifies that tools without TimeoutTool get DefaultToolTimeout.
+func TestGetTimeout_Default(t *testing.T) {
+	tool := &customTestTool{name: "notimeout"}
+	got := GetTimeout(tool)
+	if got != DefaultToolTimeout {
+		t.Errorf("expected DefaultToolTimeout (%v), got %v", DefaultToolTimeout, got)
+	}
+}
+
+// timeoutTestTool is a tool that implements TimeoutTool.
+type timeoutTestTool struct {
+	customTestTool
+	timeout time.Duration
+}
+
+func (t *timeoutTestTool) Timeout() time.Duration { return t.timeout }
+
+// TestGetTimeout_Custom verifies that tools implementing TimeoutTool return their value.
+func TestGetTimeout_Custom(t *testing.T) {
+	want := 42 * time.Second
+	tool := &timeoutTestTool{
+		customTestTool: customTestTool{name: "withtimeout"},
+		timeout:        want,
+	}
+	got := GetTimeout(tool)
+	if got != want {
+		t.Errorf("expected %v, got %v", want, got)
 	}
 }

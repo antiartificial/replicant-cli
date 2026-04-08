@@ -45,6 +45,12 @@ type PermissionResponseMsg struct {
 	Approved   bool
 }
 
+// ToolProgressMsg carries partial output from a streaming tool.
+type ToolProgressMsg struct {
+	ID     string
+	Output string
+}
+
 // CommandMsg is a local slash command that the TUI handles without sending to the agent.
 type CommandMsg struct {
 	Command string

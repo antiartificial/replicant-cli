@@ -194,15 +194,23 @@ func run(replicantName, modelOverride, resumeID string) error {
 		toolRegistry.Register(tools.NewRecallTool(mem))
 	}
 
-	// Wire up the delegate tool so replicants can spawn child agents.
-	// The provider factory closure captures the API keys from config.
-	delegateTool := tools.NewDelegateTool(reg, toolRegistry, func(model string) (agent.Provider, string, error) {
-		if model == "" {
-			model = cfg.DefaultModel
+	// Provider factory closure shared by delegate and spawn tools.
+	providerFactory := func(m string) (agent.Provider, string, error) {
+		if m == "" {
+			m = cfg.DefaultModel
 		}
-		return agent.NewProvider(model, cfg.AnthropicKey, cfg.OpenAIKey)
-	})
+		return agent.NewProvider(m, cfg.AnthropicKey, cfg.OpenAIKey)
+	}
+
+	// Wire up the delegate tool so replicants can spawn child agents from
+	// predefined replicant definitions.
+	delegateTool := tools.NewDelegateTool(reg, toolRegistry, providerFactory)
 	toolRegistry.Register(delegateTool)
+
+	// Wire up the spawn tool so replicants can create ad-hoc child agents
+	// with inline system prompts at runtime.
+	spawnTool := tools.NewSpawnTool(toolRegistry, providerFactory, model)
+	toolRegistry.Register(spawnTool)
 
 	resolvedTools := toolRegistry.Resolve(def.Tools)
 
@@ -224,6 +232,26 @@ func run(replicantName, modelOverride, resumeID string) error {
 			return "", fmt.Errorf("unknown tool: %s", name)
 		}
 		return tools.RunTool(ctx, t, args)
+	}
+
+	// toolStreamer is called for tools that support streaming output. It checks
+	// whether the tool implements StreamingTool; if so, it runs it with a
+	// progress channel and returns the result. Progress lines are sent back via
+	// the channel for the agent to emit as EventToolProgress events.
+	// When the tool does not support streaming it returns nil so the agent
+	// falls through to toolRunnerCtx.
+	toolStreamer := func(ctx context.Context, name, args string, progress chan<- string) *agent.ToolStreamResult {
+		t, ok := toolRegistry.Get(name)
+		if !ok {
+			return &agent.ToolStreamResult{Err: fmt.Errorf("unknown tool: %s", name)}
+		}
+		st, ok := t.(tools.StreamingTool)
+		if !ok {
+			// Not a streaming tool — fall through to toolRunnerCtx.
+			return nil
+		}
+		result, err := st.RunStreaming(ctx, args, progress)
+		return &agent.ToolStreamResult{Result: result, Err: err}
 	}
 
 	// currentEventsCh is set by agentFn on each invocation so the permission
@@ -263,6 +291,7 @@ func run(replicantName, modelOverride, resumeID string) error {
 		agent.WithTemperature(def.Temperature),
 		agent.WithTools(toolDefs),
 		agent.WithToolRunnerCtx(toolRunnerCtx),
+		agent.WithToolStreamer(toolStreamer),
 		agent.WithMaxTurns(def.MaxTurns),
 		agent.WithPermissionFn(permFn),
 		agent.WithAutoCompact(agent.CompactThreshold(model)),
@@ -398,7 +427,7 @@ func run(replicantName, modelOverride, resumeID string) error {
 	}
 
 	// Launch the TUI.
-	return tui.Run(model, agentFn, tui.CommandHandler(cmdHandler), autonomyLevelName(*autonomyLevel), replayEntries)
+	return tui.Run(model, agentFn, tui.CommandHandler(cmdHandler), autonomyLevelName(*autonomyLevel), replayEntries, def.Name)
 }
 
 // buildSessionSummary creates a brief summary of a single agent turn for

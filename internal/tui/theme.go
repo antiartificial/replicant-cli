@@ -52,6 +52,12 @@ var (
 				Foreground(ColorRed).
 				PaddingLeft(4)
 
+	// StyleToolResultMeta shows the line count / truncation hint below a result.
+	StyleToolResultMeta = lipgloss.NewStyle().
+				Foreground(ColorDimGray).
+				Italic(true).
+				PaddingLeft(4)
+
 	// StatusBar — bottom bar with model/token info
 	StyleStatusBar = lipgloss.NewStyle().
 			Background(ColorDarkBG).

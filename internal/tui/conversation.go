@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// maxResultLines is the number of output lines shown before truncation.
+const maxResultLines = 15
+
+// maxArgValueLines is the number of lines shown per arg value before truncation.
+const maxArgValueLines = 3
 
 // ReplayEntry is a single item replayed into the conversation view when resuming
 // a previous session. It mirrors SessionEntry but lives in the tui package so
@@ -50,19 +57,26 @@ type ConversationModel struct {
 	streamingIdx int
 	streamBuf    strings.Builder
 
+	replicantName string
+
 	width  int
 	height int
 }
 
 // NewConversationModel creates an empty conversation view.
-func NewConversationModel(width, height int) ConversationModel {
+// replicantName is shown in the assistant label (e.g. "deckard", "rachael").
+func NewConversationModel(width, height int, replicantName string) ConversationModel {
+	if replicantName == "" {
+		replicantName = "assistant"
+	}
 	vp := viewport.New(width, height)
 	vp.SetContent("")
 	return ConversationModel{
-		viewport:     vp,
-		streamingIdx: -1,
-		width:        width,
-		height:       height,
+		viewport:      vp,
+		replicantName: replicantName,
+		streamingIdx:  -1,
+		width:         width,
+		height:        height,
 	}
 }
 
@@ -104,7 +118,7 @@ func (m *ConversationModel) AddUserMessage(text string) {
 // StartAssistantMessage opens a new streaming assistant block.
 func (m *ConversationModel) StartAssistantMessage() {
 	m.streamBuf.Reset()
-	label := StyleAssistantLabel.Render("▸ deckard")
+	label := StyleAssistantLabel.Render("▸ " + m.replicantName)
 	ts := StyleTimestamp.Render(time.Now().Format("15:04:05"))
 	header := lipgloss.JoinHorizontal(lipgloss.Top, label, "  ", ts)
 
@@ -125,7 +139,7 @@ func (m *ConversationModel) AppendChunk(text string) {
 	m.streamBuf.WriteString(text)
 	b := &m.blocks[m.streamingIdx]
 
-	label := StyleAssistantLabel.Render("▸ deckard")
+	label := StyleAssistantLabel.Render("▸ " + m.replicantName)
 	ts := StyleTimestamp.Render(b.timestamp.Format("15:04:05"))
 	header := lipgloss.JoinHorizontal(lipgloss.Top, label, "  ", ts)
 	body := StyleAssistantMessage.Width(m.width - 2).Render(m.streamBuf.String())
@@ -146,10 +160,11 @@ func (m *ConversationModel) FinalizeAssistant() {
 	m.rebuildViewport()
 }
 
-// AddToolCall appends a tool call block.
+// AddToolCall appends a tool call block with formatted args.
 func (m *ConversationModel) AddToolCall(id, name, args string) {
-	label := StyleToolCallLabel.Render(fmt.Sprintf("◆ %s", name))
-	argsRendered := StyleToolCallArgs.Width(m.width - 6).Render(args)
+	label := StyleToolCallLabel.Render("◆ " + name)
+	argsFormatted := formatToolArgs(name, args)
+	argsRendered := StyleToolCallArgs.Width(m.width - 6).Render(argsFormatted)
 	rendered := label + "\n" + argsRendered + "\n"
 
 	m.blocks = append(m.blocks, messageBlock{
@@ -161,15 +176,45 @@ func (m *ConversationModel) AddToolCall(id, name, args string) {
 	m.rebuildViewport()
 }
 
-// AddToolResult appends the result of a tool call.
+// AddToolResult appends the result of a tool call with truncation and status.
 func (m *ConversationModel) AddToolResult(id, result string, isError bool) {
-	var body string
 	if isError {
-		body = StyleToolResultError.Width(m.width - 6).Render("  error: " + result)
-	} else {
-		body = StyleToolResult.Width(m.width - 6).Render(result)
+		body := StyleToolResultError.Width(m.width - 6).Render("  error: " + result)
+		m.blocks = append(m.blocks, messageBlock{
+			kind:      kindToolResult,
+			rendered:  body + "\n",
+			timestamp: time.Now(),
+			id:        id,
+		})
+		m.rebuildViewport()
+		return
 	}
+
+	lines := strings.Split(result, "\n")
+	totalLines := len(lines)
+
+	var displayLines []string
+	var meta string
+	if totalLines > maxResultLines {
+		displayLines = lines[:maxResultLines]
+		hidden := totalLines - maxResultLines
+		meta = fmt.Sprintf("[%d more lines]", hidden)
+	} else {
+		displayLines = lines
+	}
+
+	// Indent each line for visual hierarchy.
+	indented := make([]string, len(displayLines))
+	for i, l := range displayLines {
+		indented[i] = "    " + l
+	}
+	content := strings.Join(indented, "\n")
+
+	body := StyleToolResult.Width(m.width - 6).Render(content)
 	rendered := body + "\n"
+	if meta != "" {
+		rendered += StyleToolResultMeta.Render(meta) + "\n"
+	}
 
 	m.blocks = append(m.blocks, messageBlock{
 		kind:      kindToolResult,
@@ -177,6 +222,32 @@ func (m *ConversationModel) AddToolResult(id, result string, isError bool) {
 		timestamp: time.Now(),
 		id:        id,
 	})
+	m.rebuildViewport()
+}
+
+// AppendToolProgress appends a partial output line to the most recent tool call
+// block that matches the given ID. If no matching block is found it appends to
+// the most recent tool call block regardless of ID.
+func (m *ConversationModel) AppendToolProgress(id, output string) {
+	// Find the most recent kindToolCall block with a matching id.
+	idx := -1
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		if m.blocks[i].kind == kindToolCall {
+			if m.blocks[i].id == id || idx == -1 {
+				idx = i
+			}
+			if m.blocks[i].id == id {
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	b := &m.blocks[idx]
+	// Append the progress line inside the existing block rendered text.
+	progress := StyleToolResult.Width(m.width - 6).Render("  » " + output)
+	b.rendered += progress + "\n"
 	m.rebuildViewport()
 }
 
@@ -239,4 +310,59 @@ func (m ConversationModel) Update(msg tea.Msg) (ConversationModel, tea.Cmd) {
 // View renders the conversation viewport.
 func (m ConversationModel) View() string {
 	return m.viewport.View()
+}
+
+// ── formatting helpers ────────────────────────────────────────────────────────
+
+// formatToolArgs parses the JSON args and returns a human-readable key: value
+// listing. Long values are truncated to maxArgValueLines lines.
+func formatToolArgs(name, argsJSON string) string {
+	if argsJSON == "" {
+		return ""
+	}
+
+	// Try to decode as a flat object.
+	var m map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil {
+		// Not a JSON object — show truncated raw string.
+		return truncateArgValue(argsJSON)
+	}
+
+	if len(m) == 0 {
+		return ""
+	}
+
+	var lines []string
+	for k, v := range m {
+		var valStr string
+		switch tv := v.(type) {
+		case string:
+			valStr = tv
+		case []any:
+			parts := make([]string, 0, len(tv))
+			for _, item := range tv {
+				parts = append(parts, fmt.Sprintf("%v", item))
+			}
+			valStr = "[" + strings.Join(parts, ", ") + "]"
+		default:
+			b, _ := json.Marshal(v)
+			valStr = string(b)
+		}
+		valStr = truncateArgValue(valStr)
+		lines = append(lines, fmt.Sprintf("%s: %s", k, valStr))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// truncateArgValue truncates a multi-line value to maxArgValueLines lines,
+// appending a "[N more lines]" suffix when truncated.
+func truncateArgValue(val string) string {
+	lines := strings.Split(val, "\n")
+	if len(lines) <= maxArgValueLines {
+		return val
+	}
+	hidden := len(lines) - maxArgValueLines
+	kept := strings.Join(lines[:maxArgValueLines], "\n")
+	return fmt.Sprintf("%s\n[%d more lines]", kept, hidden)
 }

@@ -62,7 +62,8 @@ type AppModel struct {
 // cmdHandler may be nil; if provided, slash commands are dispatched to it
 // instead of being sent to the agent. initialAutonomy is the autonomy level
 // string displayed in the status bar at startup (e.g. "off", "normal").
-func NewAppModel(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string) AppModel {
+// replicantName is displayed as the assistant label in the conversation view.
+func NewAppModel(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replicantName string) AppModel {
 	// Start with a small default size; real size comes from WindowSizeMsg.
 	const defaultW, defaultH = 80, 24
 
@@ -72,7 +73,7 @@ func NewAppModel(modelName string, agentFn AgentFunc, cmdHandler CommandHandler,
 	}
 
 	m := AppModel{
-		conversation: NewConversationModel(defaultW, defaultH-statusBarHeight-defaultInputHeight),
+		conversation: NewConversationModel(defaultW, defaultH-statusBarHeight-defaultInputHeight, replicantName),
 		input:        NewInputModel(defaultW),
 		statusbar:    sb,
 		spinner:      NewSpinnerModel(),
@@ -265,6 +266,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.conversation.AddToolResult(msg.ID, msg.Result, msg.IsError)
 		cmds = append(cmds, drainChannel(msg.ch))
 
+	case toolProgressWithChanMsg:
+		m.conversation.AppendToolProgress(msg.ID, msg.Output)
+		cmds = append(cmds, drainChannel(msg.ch))
+
 	// Plain versions (for external callers who don't use channel-draining)
 	case StreamChunkMsg:
 		if m.state == stateWaitingForAgent {
@@ -283,6 +288,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ToolResultMsg:
 		m.conversation.AddToolResult(msg.ID, msg.Result, msg.IsError)
+
+	case ToolProgressMsg:
+		m.conversation.AppendToolProgress(msg.ID, msg.Output)
 
 	case StreamDoneMsg:
 		m.conversation.FinalizeAssistant()
@@ -423,6 +431,11 @@ type permissionRequestWithChanMsg struct {
 	ch <-chan tea.Msg
 }
 
+type toolProgressWithChanMsg struct {
+	ToolProgressMsg
+	ch <-chan tea.Msg
+}
+
 // drainChannel reads the next message from ch and wraps it so the Update
 // loop knows to keep draining. Closes with StreamDoneMsg when ch is closed.
 func drainChannel(ch <-chan tea.Msg) tea.Cmd {
@@ -440,6 +453,8 @@ func drainChannel(ch <-chan tea.Msg) tea.Cmd {
 			return toolResultWithChanMsg{ToolResultMsg: m, ch: ch}
 		case PermissionRequestMsg:
 			return permissionRequestWithChanMsg{PermissionRequestMsg: m, ch: ch}
+		case ToolProgressMsg:
+			return toolProgressWithChanMsg{ToolProgressMsg: m, ch: ch}
 		default:
 			// StreamDoneMsg, StreamErrorMsg, etc. pass through
 			return msg
@@ -457,8 +472,9 @@ func stubAgentCmd(input string) tea.Cmd {
 // Run is the entry point for launching the TUI program.
 // replayEntries may be nil; when non-nil, the session history is replayed
 // into the conversation view before the user's first input.
-func Run(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replayEntries []ReplayEntry) error {
-	m := NewAppModel(modelName, agentFn, cmdHandler, initialAutonomy)
+// replicantName is shown as the assistant label in the conversation view.
+func Run(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replayEntries []ReplayEntry, replicantName string) error {
+	m := NewAppModel(modelName, agentFn, cmdHandler, initialAutonomy, replicantName)
 	if len(replayEntries) > 0 {
 		m = m.WithReplayEntries(replayEntries)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -493,5 +494,107 @@ func TestNewAgent_Options(t *testing.T) {
 	}
 	if a.temperature != 0.5 {
 		t.Errorf("temperature = %f, want 0.5", a.temperature)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAgent_ToolTimeout
+// ---------------------------------------------------------------------------
+
+// TestAgent_ToolTimeout verifies that when the agent's context is cancelled
+// while a slow tool is running, the agent emits EventError with the context
+// error.
+func TestAgent_ToolTimeout(t *testing.T) {
+	prov := &MockProvider{
+		responses: []mockResponse{
+			// First turn: request a tool call.
+			toolUseResponse("t1", "slow_tool", `{}`),
+			// Never reached: the context is cancelled during the tool call.
+			textResponse("done"),
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	a := NewAgent(prov,
+		WithMaxTurns(5),
+		WithToolRunnerCtx(func(ctx context.Context, name, args string) (string, error) {
+			// Simulate a slow tool that respects the context.
+			select {
+			case <-time.After(5 * time.Second):
+				return "finished", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}),
+	)
+
+	// Cancel after a short delay so the tool is mid-execution.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	events := runAgent(a, ctx, "call slow tool")
+
+	var gotError bool
+	for _, e := range events {
+		if e.Type == EventError {
+			gotError = true
+			if e.Error == nil {
+				t.Error("EventError should carry a non-nil error")
+			}
+		}
+	}
+	if !gotError {
+		t.Error("expected EventError when context is cancelled during tool execution")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestAgent_ToolRunnerCtx
+// ---------------------------------------------------------------------------
+
+// TestAgent_ToolRunnerCtx verifies that WithToolRunnerCtx is preferred over
+// WithToolRunner when both are registered.
+func TestAgent_ToolRunnerCtx(t *testing.T) {
+	var ctxRunnerCalled bool
+	var plainRunnerCalled bool
+
+	prov := &MockProvider{
+		responses: []mockResponse{
+			toolUseResponse("t1", "my_tool", `{}`),
+			textResponse("done"),
+		},
+	}
+
+	a := NewAgent(prov,
+		WithToolRunner(func(name, args string) (string, error) {
+			plainRunnerCalled = true
+			return "plain result", nil
+		}),
+		WithToolRunnerCtx(func(ctx context.Context, name, args string) (string, error) {
+			ctxRunnerCalled = true
+			return "ctx result", nil
+		}),
+	)
+
+	events := runAgent(a, context.Background(), "call a tool")
+
+	if !ctxRunnerCalled {
+		t.Error("expected WithToolRunnerCtx to be called")
+	}
+	if plainRunnerCalled {
+		t.Error("WithToolRunner should NOT be called when WithToolRunnerCtx is set")
+	}
+
+	var gotResult bool
+	for _, e := range events {
+		if e.Type == EventToolResult && e.Result == "ctx result" {
+			gotResult = true
+		}
+	}
+	if !gotResult {
+		t.Error("expected EventToolResult with 'ctx result'")
 	}
 }
