@@ -2,7 +2,7 @@
 name: zhora
 description: Debugging and investigation specialist
 model: anthropic/claude-sonnet-4-20250514
-tools: [read_file, execute, glob, grep]
+tools: [read_file, list_dir, execute, glob, grep]
 max_turns: 30
 temperature: 0.2
 ---

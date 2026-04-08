@@ -2,7 +2,7 @@
 name: pris
 description: Quick validation and code review
 model: anthropic/claude-haiku-4-5-20251001
-tools: [read_file, glob, grep]
+tools: [read_file, list_dir, glob, grep]
 max_turns: 10
 temperature: 0.2
 ---

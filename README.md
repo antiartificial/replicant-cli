@@ -225,7 +225,9 @@ When the conversation exceeds the threshold, older messages are summarized by th
 | Tool | Risk | What it does |
 |------|------|-------------|
 | `read_file` | none | Read file contents with line numbers |
-| `edit_file` | low | Search-and-replace in files |
+| `write_file` | low | Create or overwrite a file (creates parent dirs) |
+| `edit_file` | low | Search-and-replace in existing files |
+| `list_dir` | none | List directory contents with sizes |
 | `execute` | high | Run shell commands with timeout |
 | `glob` | none | Find files by pattern |
 | `grep` | none | Search file contents (uses ripgrep) |

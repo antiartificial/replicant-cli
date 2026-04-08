@@ -10,7 +10,9 @@ func NewRegistry() *Registry {
 	r := &Registry{tools: make(map[string]Tool)}
 	for _, t := range []Tool{
 		&ReadFileTool{},
+		&WriteFileTool{},
 		&EditFileTool{},
+		&ListDirTool{},
 		&ExecuteTool{},
 		&GlobTool{},
 		&GrepTool{},
