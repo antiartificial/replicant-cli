@@ -107,10 +107,10 @@ type StreamProvider interface {
 //
 // It returns the provider, the bare model name (without the prefix), and any
 // error. When no prefix is present the model is assumed to be Anthropic.
-func NewProvider(model string, anthropicKey string, openaiKey string) (Provider, string, error) {
+func NewProvider(model string, anthropicKey, openaiKey, xaiKey string) (Provider, string, error) {
 	prefix, bare, found := strings.Cut(model, "/")
 	if !found {
-		// No prefix — treat as Anthropic for backward compatibility.
+		// No prefix -- treat as Anthropic for backward compatibility.
 		return NewAnthropicProvider(anthropicKey), model, nil
 	}
 
@@ -120,7 +120,12 @@ func NewProvider(model string, anthropicKey string, openaiKey string) (Provider,
 	case "openai":
 		return NewOpenAIProvider(openaiKey), bare, nil
 	case "xai":
-		return NewXAIProvider(openaiKey), bare, nil
+		// Use dedicated xAI key if set, fall back to OpenAI key.
+		key := xaiKey
+		if key == "" {
+			key = openaiKey
+		}
+		return NewXAIProvider(key), bare, nil
 	default:
 		return nil, "", fmt.Errorf("unknown provider prefix %q in model %q", prefix, model)
 	}

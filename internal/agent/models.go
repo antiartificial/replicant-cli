@@ -23,6 +23,8 @@ var modelRegistry = map[string]ModelInfo{
 	// xAI
 	"grok-3":                          {ContextWindow: 131072, MaxOutput: 16384},
 	"grok-3-mini":                     {ContextWindow: 131072, MaxOutput: 16384},
+	"grok-3-fast":                     {ContextWindow: 131072, MaxOutput: 16384},
+	"grok-2":                          {ContextWindow: 131072, MaxOutput: 8192},
 }
 
 // LookupModel returns the ModelInfo for a model name. If not found, returns

@@ -13,6 +13,7 @@ import (
 type Config struct {
 	AnthropicKey string `json:"anthropic_api_key,omitempty"`
 	OpenAIKey    string `json:"openai_api_key,omitempty"`
+	XAIKey       string `json:"xai_api_key,omitempty"`
 	DefaultModel string `json:"default_model,omitempty"`
 	SessionDir   string `json:"session_dir,omitempty"`
 	MemoryDir    string `json:"memory_dir,omitempty"`
@@ -69,6 +70,9 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
 		cfg.OpenAIKey = v
+	}
+	if v := os.Getenv("XAI_API_KEY"); v != "" {
+		cfg.XAIKey = v
 	}
 	if v := os.Getenv("REPLICANT_MODEL"); v != "" {
 		cfg.DefaultModel = v

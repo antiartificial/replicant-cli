@@ -111,7 +111,7 @@ func run(replicantName, modelOverride, resumeID string) error {
 	}
 
 	// Create the provider and strip any "provider/" prefix from the model name.
-	provider, model, err := agent.NewProvider(model, cfg.AnthropicKey, cfg.OpenAIKey)
+	provider, model, err := agent.NewProvider(model, cfg.AnthropicKey, cfg.OpenAIKey, cfg.XAIKey)
 	if err != nil {
 		return fmt.Errorf("provider: %w", err)
 	}
@@ -239,7 +239,7 @@ func run(replicantName, modelOverride, resumeID string) error {
 		if m == "" {
 			m = cfg.DefaultModel
 		}
-		return agent.NewProvider(m, cfg.AnthropicKey, cfg.OpenAIKey)
+		return agent.NewProvider(m, cfg.AnthropicKey, cfg.OpenAIKey, cfg.XAIKey)
 	}
 
 	// Wire up the delegate tool so replicants can spawn child agents from
