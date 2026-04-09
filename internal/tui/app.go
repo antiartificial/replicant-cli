@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -213,6 +214,28 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+y" {
 			if text := m.conversation.LastAssistantText(); text != "" {
 				return m, copyToClipboard(text)
+			}
+			return m, nil
+		}
+
+		// Tab: cycle autonomy level (off -> normal -> high -> full -> off).
+		if msg.Type == tea.KeyTab && m.state == stateIdle {
+			if m.cmdHandler != nil {
+				current := m.statusbar.autonomy
+				var next string
+				switch current {
+				case "off":
+					next = "normal"
+				case "normal":
+					next = "high"
+				case "high":
+					next = "full"
+				default:
+					next = "off"
+				}
+				response := m.cmdHandler("auto", next)
+				m.statusbar.SetAutonomy(next)
+				m.conversation.AddBanner(response)
 			}
 			return m, nil
 		}
@@ -427,6 +450,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+
+		// Advance task animation on spinner ticks.
+		if _, ok := msg.(spinner.TickMsg); ok && m.conversation.HasActiveTasks() {
+			m.conversation.AdvanceTaskFrame()
+		}
 	}
 
 	return m, tea.Batch(cmds...)

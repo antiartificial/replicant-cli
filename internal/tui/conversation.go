@@ -65,6 +65,8 @@ type ConversationModel struct {
 	activeTasks []taskEntry
 	// taskBlockIdx is the index of the kindTaskGroup block (-1 if none).
 	taskBlockIdx int
+	// taskFrame is the animation frame counter for spinning indicators.
+	taskFrame int
 
 	width  int
 	height int
@@ -304,17 +306,12 @@ type taskEntry struct {
 	detail string
 }
 
-var taskStatusIcons = map[string]string{
-	"running":   ">>",
-	"completed": "ok",
-	"failed":    "!!",
-	"waiting":   "..",
-}
+// Spinner frames for running/waiting tasks (braille-style).
+var runningFrames = []string{"/", "-", "\\", "|"}
+var waitingFrames = []string{".  ", ".. ", "...", "   "}
 
 // UpdateTask updates or adds a task in the active task group display.
-// Tasks are shown as a compact group in the conversation with status icons.
 func (m *ConversationModel) UpdateTask(id, name, status, detail string) {
-	// Find existing task by ID.
 	found := false
 	for i := range m.activeTasks {
 		if m.activeTasks[i].id == id {
@@ -331,24 +328,50 @@ func (m *ConversationModel) UpdateTask(id, name, status, detail string) {
 			id: id, name: name, status: status, detail: detail,
 		})
 	}
+	m.renderTaskGroup()
+}
 
-	// Render the task group block.
+// AdvanceTaskFrame increments the animation frame and re-renders active tasks.
+// Call this on every spinner tick when tasks are active.
+func (m *ConversationModel) AdvanceTaskFrame() {
+	if len(m.activeTasks) == 0 {
+		return
+	}
+	m.taskFrame++
+	m.renderTaskGroup()
+}
+
+// HasActiveTasks returns true if any tasks are running or waiting.
+func (m *ConversationModel) HasActiveTasks() bool {
+	for _, t := range m.activeTasks {
+		if t.status == "running" || t.status == "waiting" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *ConversationModel) renderTaskGroup() {
 	var sb strings.Builder
 	for _, t := range m.activeTasks {
-		icon, ok := taskStatusIcons[t.status]
-		if !ok {
-			icon = "  "
-		}
-
+		var icon string
 		var style lipgloss.Style
+
 		switch t.status {
+		case "running":
+			icon = runningFrames[m.taskFrame%len(runningFrames)]
+			style = StyleToolCallLabel
+		case "waiting":
+			icon = waitingFrames[m.taskFrame%len(waitingFrames)]
+			style = StyleToolCallArgs
 		case "completed":
+			icon = "ok"
 			style = StyleToolResult
 		case "failed":
+			icon = "!!"
 			style = StyleToolResultError
-		case "running":
-			style = StyleToolCallLabel
 		default:
+			icon = "  "
 			style = StyleToolCallArgs
 		}
 
@@ -362,7 +385,6 @@ func (m *ConversationModel) UpdateTask(id, name, status, detail string) {
 
 	rendered := sb.String()
 
-	// Update or create the task group block.
 	if m.taskBlockIdx >= 0 && m.taskBlockIdx < len(m.blocks) {
 		m.blocks[m.taskBlockIdx].rendered = rendered
 	} else {
@@ -375,15 +397,15 @@ func (m *ConversationModel) UpdateTask(id, name, status, detail string) {
 	}
 	m.rebuildViewport()
 
-	// Clean up completed tasks after a while (keep last 5 completed).
-	activeCount := 0
+	// Clear when all tasks are done.
+	hasActive := false
 	for _, t := range m.activeTasks {
 		if t.status == "running" || t.status == "waiting" {
-			activeCount++
+			hasActive = true
+			break
 		}
 	}
-	if activeCount == 0 {
-		// All done -- clear the task group on next assistant message.
+	if !hasActive {
 		m.activeTasks = nil
 		m.taskBlockIdx = -1
 	}
