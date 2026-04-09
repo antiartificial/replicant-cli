@@ -391,6 +391,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conversation.AddBanner("copied last response to clipboard")
 		}
 
+	case TokenUsageMsg:
+		m.statusbar.SetTokens(msg.InputTokens, msg.OutputTokens)
+
+	case TaskStatusMsg:
+		m.conversation.UpdateTask(msg.ID, msg.Name, msg.Status, msg.Detail)
+
 	case AutonomyChangedMsg:
 		m.statusbar.SetAutonomy(msg.Level)
 

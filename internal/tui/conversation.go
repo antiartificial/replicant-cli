@@ -38,6 +38,7 @@ const (
 	kindToolCall
 	kindToolResult
 	kindBanner
+	kindTaskGroup
 )
 
 // messageBlock is a single rendered unit in the conversation history.
@@ -60,6 +61,11 @@ type ConversationModel struct {
 
 	replicantName string
 
+	// activeTasks tracks running/completed tasks for the task group display.
+	activeTasks []taskEntry
+	// taskBlockIdx is the index of the kindTaskGroup block (-1 if none).
+	taskBlockIdx int
+
 	width  int
 	height int
 }
@@ -76,6 +82,7 @@ func NewConversationModel(width, height int, replicantName string) ConversationM
 		viewport:      vp,
 		replicantName: replicantName,
 		streamingIdx:  -1,
+		taskBlockIdx:  -1,
 		streamBuf:     &strings.Builder{},
 		width:         width,
 		height:        height,
@@ -286,6 +293,99 @@ func (m *ConversationModel) ReplayHistory(entries []ReplayEntry) {
 	}
 	if inAssistant {
 		m.FinalizeAssistant()
+	}
+}
+
+// taskEntry tracks one active or completed tool/subtask.
+type taskEntry struct {
+	id     string
+	name   string
+	status string // "running", "completed", "failed", "waiting"
+	detail string
+}
+
+var taskStatusIcons = map[string]string{
+	"running":   ">>",
+	"completed": "ok",
+	"failed":    "!!",
+	"waiting":   "..",
+}
+
+// UpdateTask updates or adds a task in the active task group display.
+// Tasks are shown as a compact group in the conversation with status icons.
+func (m *ConversationModel) UpdateTask(id, name, status, detail string) {
+	// Find existing task by ID.
+	found := false
+	for i := range m.activeTasks {
+		if m.activeTasks[i].id == id {
+			m.activeTasks[i].status = status
+			if detail != "" {
+				m.activeTasks[i].detail = detail
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.activeTasks = append(m.activeTasks, taskEntry{
+			id: id, name: name, status: status, detail: detail,
+		})
+	}
+
+	// Render the task group block.
+	var sb strings.Builder
+	for _, t := range m.activeTasks {
+		icon, ok := taskStatusIcons[t.status]
+		if !ok {
+			icon = "  "
+		}
+
+		var style lipgloss.Style
+		switch t.status {
+		case "completed":
+			style = StyleToolResult
+		case "failed":
+			style = StyleToolResultError
+		case "running":
+			style = StyleToolCallLabel
+		default:
+			style = StyleToolCallArgs
+		}
+
+		line := fmt.Sprintf("  [%s] %s", icon, t.name)
+		if t.detail != "" {
+			line += " " + StyleTimestamp.Render(t.detail)
+		}
+		sb.WriteString(style.Render(line))
+		sb.WriteByte('\n')
+	}
+
+	rendered := sb.String()
+
+	// Update or create the task group block.
+	if m.taskBlockIdx >= 0 && m.taskBlockIdx < len(m.blocks) {
+		m.blocks[m.taskBlockIdx].rendered = rendered
+	} else {
+		m.blocks = append(m.blocks, messageBlock{
+			kind:      kindTaskGroup,
+			rendered:  rendered,
+			timestamp: time.Now(),
+		})
+		m.taskBlockIdx = len(m.blocks) - 1
+	}
+	m.rebuildViewport()
+
+	// Clean up completed tasks after a while (keep last 5 completed).
+	activeCount := 0
+	for _, t := range m.activeTasks {
+		if t.status == "running" || t.status == "waiting" {
+			activeCount++
+		}
+	}
+	if activeCount == 0 {
+		// All done -- clear the task group on next assistant message.
+		m.activeTasks = nil
+		m.taskBlockIdx = -1
 	}
 }
 

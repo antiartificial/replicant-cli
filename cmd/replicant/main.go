@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -367,7 +368,17 @@ func run(replicantName, modelOverride, resumeID string) error {
 			close(agentEvents)
 		}()
 
+		var lastUsage agent.Usage
 		for ev := range agentEvents {
+			// Update token counters whenever usage changes.
+			if ev.Usage.InputTokens != lastUsage.InputTokens || ev.Usage.OutputTokens != lastUsage.OutputTokens {
+				lastUsage = ev.Usage
+				events <- tui.TokenUsageMsg{
+					InputTokens:  ev.Usage.InputTokens,
+					OutputTokens: ev.Usage.OutputTokens,
+				}
+			}
+
 			switch ev.Type {
 			case agent.EventText:
 				_ = session.Append(agent.SessionEntry{
@@ -389,6 +400,13 @@ func run(replicantName, modelOverride, resumeID string) error {
 					Name: ev.ToolName,
 					Args: ev.ToolArgs,
 				}
+				// Show active task status for tool execution.
+				events <- tui.TaskStatusMsg{
+					ID:     ev.ToolID,
+					Name:   ev.ToolName,
+					Status: "running",
+					Detail: summarizeToolArgs(ev.ToolName, ev.ToolArgs),
+				}
 			case agent.EventToolResult:
 				_ = session.Append(agent.SessionEntry{
 					Type:   "tool_result",
@@ -399,6 +417,15 @@ func run(replicantName, modelOverride, resumeID string) error {
 					ID:      ev.ToolID,
 					Result:  ev.Result,
 					IsError: ev.IsError,
+				}
+				status := "completed"
+				if ev.IsError {
+					status = "failed"
+				}
+				events <- tui.TaskStatusMsg{
+					ID:     ev.ToolID,
+					Name:   ev.ToolName,
+					Status: status,
 				}
 			case agent.EventDone:
 				// Accumulate messages for multi-turn history.
@@ -498,6 +525,46 @@ func buildSessionSummary(userMsg, assistantReply string) string {
 		return s
 	}
 	return fmt.Sprintf("User: %s\nAssistant: %s", truncate(userMsg), truncate(assistantReply))
+}
+
+// summarizeToolArgs extracts a short detail string from tool args for the task display.
+func summarizeToolArgs(toolName, argsJSON string) string {
+	if argsJSON == "" {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &m); err != nil {
+		return ""
+	}
+	switch toolName {
+	case "read_file", "write_file", "edit_file":
+		if p, ok := m["path"].(string); ok {
+			return p
+		}
+	case "execute":
+		if c, ok := m["command"].(string); ok {
+			if len(c) > 60 {
+				c = c[:60] + "..."
+			}
+			return c
+		}
+	case "glob":
+		if p, ok := m["pattern"].(string); ok {
+			return p
+		}
+	case "grep":
+		if p, ok := m["pattern"].(string); ok {
+			return p
+		}
+	case "delegate", "spawn":
+		if n, ok := m["replicant"].(string); ok {
+			return n
+		}
+		if n, ok := m["name"].(string); ok {
+			return n
+		}
+	}
+	return ""
 }
 
 // parseAutonomyLevel converts a config string to a permission.AutonomyLevel.

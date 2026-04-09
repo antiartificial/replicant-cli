@@ -61,3 +61,17 @@ type CommandMsg struct {
 type AutonomyChangedMsg struct {
 	Level string
 }
+
+// TokenUsageMsg updates the status bar token counters.
+type TokenUsageMsg struct {
+	InputTokens  int
+	OutputTokens int
+}
+
+// TaskStatusMsg updates the active task display in the conversation.
+type TaskStatusMsg struct {
+	ID     string // unique task identifier
+	Name   string // short display name (e.g. "implement auth middleware")
+	Status string // "running", "completed", "failed", "waiting"
+	Detail string // current activity (e.g. "reading src/auth.go", "running tests")
+}

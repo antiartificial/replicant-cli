@@ -46,6 +46,12 @@ func (s *StatusBarModel) AddTokens(in, out int) {
 	s.tokenOut += out
 }
 
+// SetTokens sets the token counters to absolute values (from cumulative usage).
+func (s *StatusBarModel) SetTokens(in, out int) {
+	s.tokenIn = in
+	s.tokenOut = out
+}
+
 // SetStreaming marks whether the agent is currently streaming.
 func (s *StatusBarModel) SetStreaming(v bool) {
 	s.streaming = v
