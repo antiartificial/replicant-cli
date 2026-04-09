@@ -510,7 +510,13 @@ func run(replicantName, modelOverride, resumeID string) error {
 
 	// Launch the TUI.
 	modelInfo := agent.LookupModel(model)
-	return tui.Run(model, modelInfo.ContextWindow, agentFn, tui.CommandHandler(cmdHandler), autonomyLevelName(*autonomyLevel), replayEntries, def.Name)
+	err = tui.Run(model, modelInfo.ContextWindow, agentFn, tui.CommandHandler(cmdHandler), autonomyLevelName(*autonomyLevel), replayEntries, def.Name)
+
+	// Print session resume info after the TUI exits.
+	fmt.Fprintf(os.Stderr, "\nsession: %s\n", session.ID)
+	fmt.Fprintf(os.Stderr, "resume:  replicant -r %s --resume %s\n\n", def.Name, session.ID)
+
+	return err
 }
 
 // buildSessionSummary creates a brief summary of a single agent turn for
