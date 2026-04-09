@@ -301,6 +301,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if response != "" {
 					m.conversation.AddBanner(response)
 				}
+				// Update status bar for autonomy changes.
+				if cmd == "auto" || cmd == "autonomy" {
+					if args != "" {
+						m.statusbar.SetAutonomy(args)
+					}
+				}
 			} else {
 				m.conversation.AddBanner(fmt.Sprintf("unknown command: /%s", cmd))
 			}
