@@ -483,6 +483,8 @@ func run(replicantName, modelOverride, resumeID string) error {
 				"available commands:",
 				"  /auto              show current autonomy level",
 				"  /auto <level>      set autonomy (off|normal|high|full)",
+				"  /context           show current context usage",
+				"  /compact           compress conversation history",
 				"  /model             show current model",
 				"  /session           show current session path",
 				"  /copy              copy last response to clipboard",
@@ -491,9 +493,10 @@ func run(replicantName, modelOverride, resumeID string) error {
 				"  /quit              exit replicant",
 				"",
 				"shortcuts:",
+				"  Tab                cycle autonomy level",
 				"  Ctrl+M             toggle mouse capture",
 				"  Ctrl+Y             copy last response to clipboard",
-				"  Esc                interrupt streaming",
+				"  Esc                interrupt/cancel",
 				"  Ctrl+C             quit",
 			}, "\n")
 
@@ -502,6 +505,32 @@ func run(replicantName, modelOverride, resumeID string) error {
 
 		case "session":
 			return fmt.Sprintf("session: %s", session.ID)
+
+		case "compact":
+			before := len(history)
+			tokens := agent.EstimateTokens(history)
+			if before <= 10 {
+				return fmt.Sprintf("nothing to compact (%d messages, ~%d tokens)", before, tokens)
+			}
+			compacted, _, err := agent.CompactHistory(
+				context.Background(), provider, model, history, 10,
+			)
+			if err != nil {
+				return fmt.Sprintf("compact failed: %v", err)
+			}
+			history = compacted
+			after := len(history)
+			return fmt.Sprintf("compacted: %d -> %d messages (~%d tokens freed)", before, after, tokens-agent.EstimateTokens(history))
+
+		case "context":
+			tokens := agent.EstimateTokens(history)
+			modelInfo := agent.LookupModel(model)
+			pct := 0
+			if modelInfo.ContextWindow > 0 {
+				pct = tokens * 100 / modelInfo.ContextWindow
+			}
+			return fmt.Sprintf("context: ~%d tokens / %d limit (%d%%), %d messages",
+				tokens, modelInfo.ContextWindow, pct, len(history))
 
 		default:
 			return fmt.Sprintf("unknown command: /%s — type /help for a list", command)
