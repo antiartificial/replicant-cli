@@ -186,13 +186,24 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case tea.KeyEsc:
-			// Interrupt active streaming
-			if m.state != stateIdle && m.cancelFn != nil {
-				m.cancelFn()
-				m.cancelFn = nil
+			// Interrupt any active operation.
+			if m.state != stateIdle {
+				if m.cancelFn != nil {
+					m.cancelFn()
+					m.cancelFn = nil
+				}
+				// Also deny any pending permission request.
+				if m.pendingPermission != nil {
+					m.pendingPermission <- false
+					m.pendingPermission = nil
+					m.pendingEventsCh = nil
+				}
+				// Clear queued messages.
+				m.queuedMessages = nil
 				m.state = stateIdle
 				m.spinner.Stop()
 				m.conversation.FinalizeAssistant()
+				m.conversation.AddBanner("[interrupted]")
 				m.input.Enable()
 				m.statusbar.SetStreaming(false)
 			}
@@ -420,6 +431,21 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TaskStatusMsg:
 		m.conversation.UpdateTask(msg.ID, msg.Name, msg.Status, msg.Detail)
 
+	// genericWithChanMsg wraps messages that don't have dedicated wrappers
+	// (TokenUsageMsg, TaskStatusMsg, etc.). Process the inner message and
+	// continue draining the channel.
+	case genericWithChanMsg:
+		// Recursively process the inner message.
+		switch inner := msg.inner.(type) {
+		case TokenUsageMsg:
+			m.statusbar.SetTokens(inner.InputTokens, inner.OutputTokens)
+		case TaskStatusMsg:
+			m.conversation.UpdateTask(inner.ID, inner.Name, inner.Status, inner.Detail)
+		case AutonomyChangedMsg:
+			m.statusbar.SetAutonomy(inner.Level)
+		}
+		cmds = append(cmds, drainChannel(msg.ch))
+
 	case AutonomyChangedMsg:
 		m.statusbar.SetAutonomy(msg.Level)
 
@@ -536,6 +562,13 @@ type toolProgressWithChanMsg struct {
 	ch <-chan tea.Msg
 }
 
+// genericWithChanMsg wraps any message type that doesn't have a dedicated
+// wrapper but still needs the channel reference for continued draining.
+type genericWithChanMsg struct {
+	inner tea.Msg
+	ch    <-chan tea.Msg
+}
+
 // drainChannel reads the next message from ch and wraps it so the Update
 // loop knows to keep draining. Closes with StreamDoneMsg when ch is closed.
 func drainChannel(ch <-chan tea.Msg) tea.Cmd {
@@ -555,9 +588,13 @@ func drainChannel(ch <-chan tea.Msg) tea.Cmd {
 			return permissionRequestWithChanMsg{PermissionRequestMsg: m, ch: ch}
 		case ToolProgressMsg:
 			return toolProgressWithChanMsg{ToolProgressMsg: m, ch: ch}
-		default:
-			// StreamDoneMsg, StreamErrorMsg, etc. pass through
+		case StreamDoneMsg, StreamErrorMsg:
+			// Terminal messages -- no need to continue draining.
 			return msg
+		default:
+			// All other messages (TokenUsageMsg, TaskStatusMsg, etc.)
+			// must carry the channel so draining continues.
+			return genericWithChanMsg{inner: m, ch: ch}
 		}
 	}
 }
