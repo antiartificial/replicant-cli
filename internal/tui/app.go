@@ -54,6 +54,10 @@ type AppModel struct {
 	// replayEntries holds session history to replay after the first resize.
 	replayEntries []ReplayEntry
 
+	// mouseEnabled tracks whether mouse capture is active. When false, the
+	// terminal handles selection natively (so the user can highlight + copy).
+	mouseEnabled bool
+
 	width  int
 	height int
 }
@@ -190,6 +194,25 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Ctrl+M: toggle mouse capture. When off, the terminal handles
+		// text selection natively so the user can highlight and copy.
+		if msg.String() == "ctrl+m" {
+			m.mouseEnabled = !m.mouseEnabled
+			m.statusbar.SetMouse(m.mouseEnabled)
+			if m.mouseEnabled {
+				return m, tea.EnableMouseCellMotion
+			}
+			return m, tea.DisableMouse
+		}
+
+		// Ctrl+Y: copy the last assistant response to clipboard.
+		if msg.String() == "ctrl+y" {
+			if text := m.conversation.LastAssistantText(); text != "" {
+				return m, copyToClipboard(text)
+			}
+			return m, nil
+		}
+
 	// ── user submitted text ──────────────────────────────────────────────────
 	case SubmitMsg:
 		if m.state != stateIdle {
@@ -207,9 +230,26 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd = strings.ToLower(strings.TrimSpace(cmd))
 			args = strings.TrimSpace(args)
 
-			// Built-in /quit handled here directly.
+			// Built-in TUI commands handled directly.
 			if cmd == "quit" || cmd == "q" {
 				return m, tea.Quit
+			}
+			if cmd == "copy" || cmd == "cp" {
+				if text := m.conversation.LastAssistantText(); text != "" {
+					return m, copyToClipboard(text)
+				}
+				m.conversation.AddBanner("nothing to copy")
+				return m, nil
+			}
+			if cmd == "mouse" {
+				m.mouseEnabled = !m.mouseEnabled
+				m.statusbar.SetMouse(m.mouseEnabled)
+				if m.mouseEnabled {
+					m.conversation.AddBanner("mouse capture on (scroll with mouse, Ctrl+M to toggle)")
+					return m, tea.EnableMouseCellMotion
+				}
+				m.conversation.AddBanner("mouse capture off (select text with mouse, Ctrl+M to toggle)")
+				return m, tea.DisableMouse
 			}
 
 			// Dispatch to handler if available.
@@ -324,6 +364,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateWaitingForPermission
 		m.spinner.Stop()
 		m.statusbar.SetStreaming(false)
+
+	case clipboardResultMsg:
+		if msg.err != nil {
+			m.conversation.AddBanner(fmt.Sprintf("clipboard: %v", msg.err))
+		} else {
+			m.conversation.AddBanner("copied last response to clipboard")
+		}
 
 	case AutonomyChangedMsg:
 		m.statusbar.SetAutonomy(msg.Level)
@@ -475,6 +522,8 @@ func stubAgentCmd(input string) tea.Cmd {
 // replicantName is shown as the assistant label in the conversation view.
 func Run(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replayEntries []ReplayEntry, replicantName string) error {
 	m := NewAppModel(modelName, agentFn, cmdHandler, initialAutonomy, replicantName)
+	m.mouseEnabled = true
+	m.statusbar.SetMouse(true)
 	if len(replayEntries) > 0 {
 		m = m.WithReplayEntries(replayEntries)
 	}

@@ -44,6 +44,7 @@ const (
 type messageBlock struct {
 	kind      messageKind
 	rendered  string // final rendered string (may be multi-line)
+	rawText   string // unstyled text content (for copy-to-clipboard)
 	timestamp time.Time
 	id        string // tool call ID for linking calls to results
 }
@@ -142,7 +143,8 @@ func (m *ConversationModel) AppendChunk(text string) {
 	label := StyleAssistantLabel.Render("▸ " + m.replicantName)
 	ts := StyleTimestamp.Render(b.timestamp.Format("15:04:05"))
 	header := lipgloss.JoinHorizontal(lipgloss.Top, label, "  ", ts)
-	body := StyleAssistantMessage.Width(m.width - 2).Render(m.streamBuf.String())
+	b.rawText = m.streamBuf.String()
+	body := StyleAssistantMessage.Width(m.width - 2).Render(b.rawText)
 	b.rendered = header + "\n" + body + "\n"
 
 	m.rebuildViewport()
@@ -282,6 +284,17 @@ func (m *ConversationModel) ReplayHistory(entries []ReplayEntry) {
 	if inAssistant {
 		m.FinalizeAssistant()
 	}
+}
+
+// LastAssistantText returns the raw (unstyled) text content of the most recent
+// assistant message block. Returns empty string if there are no assistant blocks.
+func (m *ConversationModel) LastAssistantText() string {
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		if m.blocks[i].kind == kindAssistant {
+			return m.blocks[i].rawText
+		}
+	}
+	return ""
 }
 
 // rebuildViewport concatenates all rendered blocks and refreshes the viewport content,

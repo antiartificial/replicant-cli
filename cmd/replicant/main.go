@@ -454,12 +454,20 @@ func run(replicantName, modelOverride, resumeID string) error {
 		case "help":
 			return strings.Join([]string{
 				"available commands:",
-				"  /auto              — show current autonomy level",
-				"  /auto <level>      — set autonomy (off|normal|high|full)",
-				"  /model             — show current model",
-				"  /session           — show current session path",
-				"  /help              — show this help",
-				"  /quit              — exit replicant",
+				"  /auto              show current autonomy level",
+				"  /auto <level>      set autonomy (off|normal|high|full)",
+				"  /model             show current model",
+				"  /session           show current session path",
+				"  /copy              copy last response to clipboard",
+				"  /mouse             toggle mouse capture (for text selection)",
+				"  /help              show this help",
+				"  /quit              exit replicant",
+				"",
+				"shortcuts:",
+				"  Ctrl+M             toggle mouse capture",
+				"  Ctrl+Y             copy last response to clipboard",
+				"  Esc                interrupt streaming",
+				"  Ctrl+C             quit",
 			}, "\n")
 
 		case "model":

@@ -10,13 +10,14 @@ import (
 
 // StatusBarModel tracks session statistics and renders the bottom bar.
 type StatusBarModel struct {
-	modelName string
-	autonomy  string
-	tokenIn   int
-	tokenOut  int
-	startTime time.Time
-	width     int
-	streaming bool
+	modelName    string
+	autonomy     string
+	tokenIn      int
+	tokenOut     int
+	startTime    time.Time
+	width        int
+	streaming    bool
+	mouseEnabled bool
 }
 
 // NewStatusBarModel creates a status bar for the given model name.
@@ -50,6 +51,11 @@ func (s *StatusBarModel) SetStreaming(v bool) {
 	s.streaming = v
 }
 
+// SetMouse updates the mouse capture indicator.
+func (s *StatusBarModel) SetMouse(enabled bool) {
+	s.mouseEnabled = enabled
+}
+
 // View renders the single-line status bar.
 func (s StatusBarModel) View() string {
 	elapsed := time.Since(s.startTime).Round(time.Second)
@@ -71,6 +77,13 @@ func (s StatusBarModel) View() string {
 		fmt.Sprintf("in:%d out:%d", s.tokenIn, s.tokenOut),
 	)
 
+	var mouse string
+	if s.mouseEnabled {
+		mouse = StyleStatusBarDim.Render("mouse:on")
+	} else {
+		mouse = StyleStatusBarHighlight.Render("mouse:off(select)")
+	}
+
 	dur := StyleStatusBarDim.Render(elapsed.String())
 
 	// Build center + right sections
@@ -80,6 +93,8 @@ func (s StatusBarModel) View() string {
 		model,
 		StyleStatusBarDim.Render(" │ "),
 		autonomy,
+		StyleStatusBarDim.Render(" │ "),
+		mouse,
 		StyleStatusBarDim.Render(" │ "),
 		tokens,
 		StyleStatusBarDim.Render(" │ "),
