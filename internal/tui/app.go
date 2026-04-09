@@ -54,6 +54,10 @@ type AppModel struct {
 	// replayEntries holds session history to replay after the first resize.
 	replayEntries []ReplayEntry
 
+	// queuedMessages holds inputs submitted while the agent is streaming.
+	// They are sent as follow-up messages when the current turn completes.
+	queuedMessages []string
+
 	// mouseEnabled tracks whether mouse capture is active. When false, the
 	// terminal handles selection natively (so the user can highlight + copy).
 	mouseEnabled bool
@@ -80,7 +84,7 @@ func NewAppModel(modelName string, agentFn AgentFunc, cmdHandler CommandHandler,
 		conversation: NewConversationModel(defaultW, defaultH-statusBarHeight-defaultInputHeight, replicantName),
 		input:        NewInputModel(defaultW),
 		statusbar:    sb,
-		spinner:      NewSpinnerModel(),
+		spinner:      newSpinnerWithLabel(replicantName),
 		agentFn:      agentFn,
 		cmdHandler:   cmdHandler,
 		width:        defaultW,
@@ -215,11 +219,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── user submitted text ──────────────────────────────────────────────────
 	case SubmitMsg:
-		if m.state != stateIdle {
-			return m, nil
-		}
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
+			return m, nil
+		}
+
+		// Queue input if agent is busy (not idle and not a slash command).
+		if m.state != stateIdle && !strings.HasPrefix(text, "/") {
+			m.queuedMessages = append(m.queuedMessages, text)
+			m.conversation.AddBanner(fmt.Sprintf("[queued: %s]", truncate(text, 60)))
+			m.input.Enable()
 			return m, nil
 		}
 
@@ -265,7 +274,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.conversation.AddUserMessage(text)
-		m.input.Disable()
+		m.input.SetPlaceholder("type to queue follow-up...")
+		m.input.textarea.Reset()
 		m.state = stateWaitingForAgent
 		m.statusbar.SetStreaming(true)
 		cmds = append(cmds, m.spinner.Start())
@@ -334,14 +344,23 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StreamDoneMsg:
 		m.conversation.FinalizeAssistant()
-		m.state = stateIdle
 		m.spinner.Stop()
-		m.input.Enable()
 		m.statusbar.SetStreaming(false)
 		if m.cancelFn != nil {
 			m.cancelFn()
 			m.cancelFn = nil
 		}
+
+		// If there are queued messages, send the next one immediately.
+		if len(m.queuedMessages) > 0 {
+			next := m.queuedMessages[0]
+			m.queuedMessages = m.queuedMessages[1:]
+			m.state = stateIdle
+			m.input.Enable()
+			return m, func() tea.Msg { return SubmitMsg{Text: next} }
+		}
+		m.state = stateIdle
+		m.input.Enable()
 
 	case StreamErrorMsg:
 		errText := fmt.Sprintf("error: %v", msg.Err)
@@ -530,4 +549,19 @@ func Run(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initial
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+func newSpinnerWithLabel(name string) SpinnerModel {
+	s := NewSpinnerModel()
+	if name != "" {
+		s.SetLabel(name)
+	}
+	return s
 }

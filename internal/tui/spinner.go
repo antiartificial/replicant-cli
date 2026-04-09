@@ -10,6 +10,7 @@ import (
 type SpinnerModel struct {
 	spinner spinner.Model
 	active  bool
+	label   string
 }
 
 // NewSpinnerModel creates a styled thinking spinner.
@@ -20,7 +21,12 @@ func NewSpinnerModel() SpinnerModel {
 		FPS:    80 * 1000 * 1000, // 80ms per frame
 	}
 	s.Style = lipgloss.NewStyle().Foreground(ColorNeonCyan)
-	return SpinnerModel{spinner: s}
+	return SpinnerModel{spinner: s, label: "replicant"}
+}
+
+// SetLabel sets the name shown next to the spinner (e.g. "deckard is thinking").
+func (m *SpinnerModel) SetLabel(name string) {
+	m.label = name
 }
 
 // Start activates the spinner and returns the tick command.
@@ -60,6 +66,10 @@ func (m SpinnerModel) View() string {
 		return ""
 	}
 	frame := m.spinner.View()
-	label := StyleAssistantLabel.Render(" deckard is thinking")
+	name := m.label
+	if name == "" {
+		name = "replicant"
+	}
+	label := StyleAssistantLabel.Render(" " + name + " is thinking")
 	return frame + label
 }

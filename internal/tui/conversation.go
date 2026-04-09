@@ -134,9 +134,11 @@ func (m *ConversationModel) StartAssistantMessage() {
 }
 
 // AppendChunk appends streaming text to the current assistant block.
+// If no assistant block is active (e.g. after a tool call cycle), a new
+// one is started automatically so text isn't silently dropped.
 func (m *ConversationModel) AppendChunk(text string) {
 	if m.streamingIdx < 0 || m.streamingIdx >= len(m.blocks) {
-		return
+		m.StartAssistantMessage()
 	}
 	m.streamBuf.WriteString(text)
 	b := &m.blocks[m.streamingIdx]
