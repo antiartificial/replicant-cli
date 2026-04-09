@@ -56,7 +56,7 @@ type ConversationModel struct {
 
 	// current streaming assistant block (index into blocks, -1 if none)
 	streamingIdx int
-	streamBuf    strings.Builder
+	streamBuf    *strings.Builder
 
 	replicantName string
 
@@ -76,6 +76,7 @@ func NewConversationModel(width, height int, replicantName string) ConversationM
 		viewport:      vp,
 		replicantName: replicantName,
 		streamingIdx:  -1,
+		streamBuf:     &strings.Builder{},
 		width:         width,
 		height:        height,
 	}
