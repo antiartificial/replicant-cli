@@ -509,7 +509,8 @@ func run(replicantName, modelOverride, resumeID string) error {
 	}
 
 	// Launch the TUI.
-	return tui.Run(model, agentFn, tui.CommandHandler(cmdHandler), autonomyLevelName(*autonomyLevel), replayEntries, def.Name)
+	modelInfo := agent.LookupModel(model)
+	return tui.Run(model, modelInfo.ContextWindow, agentFn, tui.CommandHandler(cmdHandler), autonomyLevelName(*autonomyLevel), replayEntries, def.Name)
 }
 
 // buildSessionSummary creates a brief summary of a single agent turn for

@@ -72,11 +72,11 @@ type AppModel struct {
 // instead of being sent to the agent. initialAutonomy is the autonomy level
 // string displayed in the status bar at startup (e.g. "off", "normal").
 // replicantName is displayed as the assistant label in the conversation view.
-func NewAppModel(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replicantName string) AppModel {
+func NewAppModel(modelName string, contextLimit int, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replicantName string) AppModel {
 	// Start with a small default size; real size comes from WindowSizeMsg.
 	const defaultW, defaultH = 80, 24
 
-	sb := NewStatusBarModel(modelName, defaultW)
+	sb := NewStatusBarModel(modelName, contextLimit, replicantName, defaultW)
 	if initialAutonomy != "" {
 		sb.SetAutonomy(initialAutonomy)
 	}
@@ -102,7 +102,7 @@ func (m AppModel) WithReplayEntries(entries []ReplayEntry) AppModel {
 }
 
 const (
-	statusBarHeight    = 1
+	statusBarHeight    = 3 // model+progress line, separator, tool counts line
 	defaultInputHeight = 5 // textarea(3) + border(2)
 )
 
@@ -350,6 +350,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner.Stop()
 		}
 		m.conversation.AddToolCall(msg.ID, msg.Name, msg.Args)
+		m.statusbar.RecordToolCall(msg.Name)
 		cmds = append(cmds, drainChannel(msg.ch))
 
 	case toolResultWithChanMsg:
@@ -375,6 +376,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner.Stop()
 		}
 		m.conversation.AddToolCall(msg.ID, msg.Name, msg.Args)
+		m.statusbar.RecordToolCall(msg.Name)
 
 	case ToolResultMsg:
 		m.conversation.AddToolResult(msg.ID, msg.Result, msg.IsError)
@@ -616,8 +618,8 @@ func stubAgentCmd(input string) tea.Cmd {
 // replayEntries may be nil; when non-nil, the session history is replayed
 // into the conversation view before the user's first input.
 // replicantName is shown as the assistant label in the conversation view.
-func Run(modelName string, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replayEntries []ReplayEntry, replicantName string) error {
-	m := NewAppModel(modelName, agentFn, cmdHandler, initialAutonomy, replicantName)
+func Run(modelName string, contextLimit int, agentFn AgentFunc, cmdHandler CommandHandler, initialAutonomy string, replayEntries []ReplayEntry, replicantName string) error {
+	m := NewAppModel(modelName, contextLimit, agentFn, cmdHandler, initialAutonomy, replicantName)
 	m.mouseEnabled = true
 	m.statusbar.SetMouse(true)
 	if len(replayEntries) > 0 {
