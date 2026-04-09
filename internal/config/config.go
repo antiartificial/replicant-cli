@@ -57,11 +57,11 @@ func Load() (*Config, error) {
 		_ = json.Unmarshal(data, cfg)
 	}
 
-	// 2. Load ~/.replicant/.env
-	loadDotEnv(filepath.Join(replicantDir, ".env"))
-
-	// 3. Load ./.env (project-local)
+	// 2. Load ./.env (project-local, higher priority)
 	loadDotEnv(".env")
+
+	// 3. Load ~/.replicant/.env (global, lower priority -- skipped if already set)
+	loadDotEnv(filepath.Join(replicantDir, ".env"))
 
 	// 4. Environment variables override everything.
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
